@@ -36,3 +36,18 @@ cd frontend && npm run build
 不得表述为镜像已经验收。
 
 镜像文件位于 `backend/Dockerfile` 和 `frontend/Dockerfile`；Compose 示例位于 `deploy/compose.example.yaml`。
+
+## 前端镜像发布
+
+前端镜像发布到 `dockersenseyang/reboot-trace`，仅构建 `linux/amd64`，且不会创建或移动 `latest` 标签。
+仓库需要配置 GitHub Actions Secrets：`DOCKERHUB_USERNAME` 和具有该仓库推送权限的
+`DOCKERHUB_TOKEN`。
+
+- 正式版本以根目录 `VERSION` 为唯一发布版本。推送匹配的 `v${VERSION}` Git 标签，或在
+  `main`、`release/**` 分支提交中修改 `VERSION`，会在前端测试、生产构建和镜像构建通过后发布
+  `dockersenseyang/reboot-trace:${VERSION}`。已存在的同名远端镜像会被幂等跳过。
+- Pull Request 和未修改 `VERSION` 的普通分支提交只执行校验，不登录 Docker Hub，也不推送镜像。
+- `Frontend image manual (dev / sha-*)` workflow 可手动选择 Git ref，并只允许发布 `dev` 或
+  `sha-*` 标签，例如 `dockersenseyang/reboot-trace:sha-abc1234`。
+
+发布前可在本地执行 `bash scripts/check_version.sh`；正式 Git 标签必须严格等于 `v${VERSION}`。
