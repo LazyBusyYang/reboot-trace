@@ -6,9 +6,10 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM nginx:1.27-alpine
+ARG IMAGE_VERSION=dev
 LABEL org.opencontainers.image.title="Reboot Trace Frontend" \
       org.opencontainers.image.description="Multi-backend reboot evidence Vue dashboard" \
-      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/LazyBusyYang/reboot-trace"
 COPY frontend/nginx.conf /etc/nginx/nginx.conf
