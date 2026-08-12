@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>数据库设计 - Reboot Trace</title><style>
+:root {
+  color-scheme: light;
+  --page: #f3f6fb;
+  --surface: #fff;
+  --surface-soft: #f8faff;
+  --ink: #182235;
+  --muted: #647087;
+  --line: #dce3ef;
+  --line-strong: #c7d2e3;
+  --brand: #315cd6;
+  --brand-dark: #173b97;
+  --brand-soft: #eaf0ff;
+  --good: #13795b;
+  --good-soft: #e8f7f1;
+  --warn-soft: #fff4df;
+  --shadow: 0 10px 32px rgba(31,54,92,.07);
+  --radius: 15px;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 82px; }
+body {
+  margin: 0;
+  color: var(--ink);
+  background: radial-gradient(circle at 8% 16%, rgba(76,116,220,.08), transparent 25rem), var(--page);
+  font: 16px/1.75 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+header {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  min-height: 210px;
+  padding: 54px max(24px, calc((100vw - 1080px) / 2)) 48px;
+  color: #fff;
+  background: linear-gradient(120deg, #112f7d 0%, #2455c6 52%, #2086c5 100%);
+}
+header::before, header::after {
+  position: absolute;
+  z-index: -1;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 50%;
+  content: "";
+}
+header::before { width: 340px; height: 340px; top: -220px; right: 7%; }
+header::after { width: 480px; height: 480px; right: -150px; bottom: -390px; }
+header h1 {
+  margin: 0 0 12px;
+  max-width: 900px;
+  font-size: clamp(32px, 5vw, 48px);
+  line-height: 1.15;
+  letter-spacing: -.035em;
+  text-wrap: balance;
+}
+header p { margin: 0; max-width: 850px; color: #e8efff; font-size: 17px; }
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  padding: 9px max(20px, calc((100vw - 1080px) / 2));
+  background: rgba(255,255,255,.92);
+  border-bottom: 1px solid rgba(199,210,227,.85);
+  box-shadow: 0 5px 18px rgba(31,54,92,.045);
+  backdrop-filter: blur(14px);
+  scrollbar-width: none;
+}
+nav::-webkit-scrollbar { display: none; }
+nav a {
+  flex: 0 0 auto;
+  padding: 8px 13px;
+  border-radius: 9px;
+  color: #526078;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 680;
+  transition: color .15s ease, background .15s ease, transform .15s ease;
+}
+nav a:hover { color: var(--brand); background: var(--brand-soft); transform: translateY(-1px); }
+.page-index nav a[href="index.html"],
+.page-requirements nav a[href="requirements.html"],
+.page-architecture nav a[href="architecture.html"],
+.page-database nav a[href="database.html"],
+.page-api nav a[href="api.html"],
+.page-frontend nav a[href="frontend.html"],
+.page-deployment nav a[href="deployment.html"] {
+  color: #fff;
+  background: var(--brand);
+  box-shadow: 0 4px 12px rgba(49,92,214,.24);
+}
+main { max-width: 1080px; margin: 32px auto 68px; padding: 0 24px; }
+section, .card {
+  margin: 20px 0;
+  padding: clamp(22px, 3.2vw, 34px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+section { scroll-margin-top: 78px; }
+section > :first-child { margin-top: 0; }
+section > :last-child { margin-bottom: 0; }
+h2 {
+  margin: 0 0 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: clamp(23px, 3vw, 28px);
+  line-height: 1.3;
+  letter-spacing: -.02em;
+}
+h3 { margin: 30px 0 10px; color: #263650; font-size: 19px; line-height: 1.4; }
+p { margin: 10px 0 16px; }
+ul, ol { padding-left: 1.45rem; }
+li { margin: 7px 0; padding-left: .2rem; }
+li::marker { color: var(--brand); font-weight: 700; }
+a { color: var(--brand); text-underline-offset: 3px; }
+a:hover { color: var(--brand-dark); }
+strong { color: #223454; }
+table {
+  width: 100%;
+  margin: 18px 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: 11px;
+  font-size: 14px;
+}
+th, td { padding: 12px 14px; border: 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th + th, td + td { border-left: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { color: #2b477d; background: var(--brand-soft); font-size: 13px; letter-spacing: .025em; }
+tbody tr:nth-child(even) { background: #fafbfe; }
+tbody tr:hover { background: #f4f7ff; }
+code {
+  padding: 2px 6px;
+  border: 1px solid #dbe4f5;
+  border-radius: 5px;
+  color: #244b9f;
+  background: #f1f5fd;
+  font: .88em/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+pre {
+  margin: 18px 0;
+  padding: 20px;
+  overflow: auto;
+  border: 1px solid #23324c;
+  border-radius: 12px;
+  color: #dce7ff;
+  background: linear-gradient(145deg, #111a2a, #17243a);
+  box-shadow: inset 0 1px rgba(255,255,255,.04);
+  line-height: 1.65;
+}
+pre code { padding: 0; border: 0; color: inherit; background: transparent; overflow-wrap: normal; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+.grid .card, .grid > div {
+  margin: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+.grid > div strong { display: block; margin-bottom: 6px; color: var(--brand-dark); font-size: 17px; }
+.grid > div p { margin: 0; color: var(--muted); }
+.note, .warning, .decision { border-left-width: 5px; }
+.note { border-left-color: var(--brand); background: linear-gradient(90deg, var(--brand-soft), #fff 34%); }
+.warning { border-left-color: #e59324; background: linear-gradient(90deg, var(--warn-soft), #fff 34%); }
+.decision { border-left-color: var(--good); background: linear-gradient(90deg, var(--good-soft), #fff 34%); }
+.muted { color: var(--muted); }
+.flow { text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+footer {
+  padding: 34px 24px 44px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  background: rgba(255,255,255,.62);
+  text-align: center;
+}
+footer a {
+  display: inline-block;
+  padding: 10px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: #fff;
+  text-decoration: none;
+  font-weight: 650;
+  box-shadow: 0 4px 14px rgba(31,54,92,.05);
+}
+@media (max-width: 720px) {
+  header { min-height: auto; padding-top: 38px; padding-bottom: 36px; }
+  header p { font-size: 15px; }
+  nav { padding-left: 14px; padding-right: 14px; }
+  main { margin-top: 20px; padding: 0 13px; }
+  section, .card { padding: 20px 17px; border-radius: 12px; }
+  table { display: block; overflow-x: auto; white-space: normal; }
+  th, td { min-width: 130px; }
+  pre { margin-left: -4px; margin-right: -4px; padding: 16px; font-size: 12px; }
+}
+@media print {
+  :root { --page: #fff; --shadow: none; }
+  body { background: #fff; font-size: 11pt; }
+  header { min-height: 0; padding: 24px; color: var(--ink); background: #fff; border-bottom: 2px solid var(--brand); }
+  header p { color: var(--muted); }
+  nav { display: none; }
+  main { max-width: none; margin: 0; padding: 0; }
+  section, .card { break-inside: avoid; margin: 16px 0; padding: 18px 0; border: 0; border-bottom: 1px solid var(--line); box-shadow: none; }
+  pre { white-space: pre-wrap; }
+  footer { display: none; }
+  a { color: inherit; text-decoration: none; }
+}
+</style></head>
+<body class="page-database"><header><h1>SQLite 数据库设计</h1><p>面向原子快照、跨生命周期查询与严格空间预算的数据模型。</p></header>
+<nav><a href="index.html">首页</a><a href="requirements.html">需求</a><a href="architecture.html">架构</a><a href="database.html">数据库</a><a href="api.html">接口</a><a href="frontend.html">前端</a><a href="deployment.html">部署</a></nav>
+<main>
+<section><h2>1. 实体关系</h2><pre class="flow">host 1 ── N lifecycle
+                 ├── N snapshot
+                 │      ├── 1 system_sample
+                 │      ├── N process_sample ── N process_rank
+                 │      └── N user_sample
+                 ├── N event（可选关联 snapshot）
+                 └── N service_session</pre><p><code>process_sample</code> 保存一次进程观测；<code>process_rank</code> 表示同一观测入选 CPU、RSS、Swap、I/O 中哪些榜单，避免一进程多榜重复存储命令行。事件必须属于生命周期，只有与某次采样直接相关时才填写可空的 <code>snapshot_id</code>。</p></section>
+<section><h2>2. 表设计</h2>
+<h3>host</h3><table><tr><th>字段</th><th>类型</th><th>说明</th></tr><tr><td>id</td><td>TEXT PK</td><td>稳定 host_id，首次启动生成并保存在数据卷。</td></tr><tr><td>hostname</td><td>TEXT</td><td>当前主机名。</td></tr><tr><td>created_at_ms</td><td>INTEGER</td><td>Unix 毫秒。</td></tr></table>
+<h3>lifecycle</h3><table><tr><th>字段</th><th>类型</th><th>说明</th></tr><tr><td>id</td><td>INTEGER PK</td><td>内部自增键。</td></tr><tr><td>host_id</td><td>TEXT FK NOT NULL</td><td>所属主机。</td></tr><tr><td>boot_id</td><td>TEXT NOT NULL</td><td>Linux boot_id；与 host_id 唯一。</td></tr><tr><td>started_at_ms / last_seen_at_ms</td><td>INTEGER</td><td>观察到的启动与最后快照时间。</td></tr><tr><td>ended_at_ms</td><td>INTEGER NULL</td><td>观察到新 boot_id 后填写；通常取上一生命周期最后观察时间，不伪造实际断电时刻。</td></tr><tr><td>termination</td><td>TEXT</td><td>active、clean_shutdown_observed、unclean_or_unknown。</td></tr><tr><td>summary_json</td><td>TEXT</td><td>清理明细前仍可保留的有限摘要。</td></tr></table>
+<h3>snapshot</h3><table><tr><th>字段</th><th>类型</th><th>说明</th></tr><tr><td>id</td><td>INTEGER PK</td><td>快照 ID。</td></tr><tr><td>lifecycle_id</td><td>INTEGER FK</td><td>所属生命周期。</td></tr><tr><td>captured_at_ms</td><td>INTEGER</td><td>采样时间。</td></tr><tr><td>scheduled_at_ms</td><td>INTEGER</td><td>计划时间，用于计算调度漂移。</td></tr><tr><td>duration_ms</td><td>INTEGER</td><td>采集耗时。</td></tr><tr><td>sample_interval_ms</td><td>INTEGER</td><td>相邻有效样本间隔。</td></tr><tr><td>detail_level</td><td>TEXT</td><td>full、downsampled、final、summary_only。</td></tr><tr><td>persistence_state</td><td>TEXT</td><td>该快照提交时的持久化状态；用于重启后区分完整与降级证据。</td></tr></table>
+<h3>system_sample</h3><p>以 <code>snapshot_id</code> 为主键，保存 CPU 各状态、load1/5/15、内存、Swap、磁盘、inode、进程/线程总数、CPU/memory/I/O PSI、uptime 及 capability 位图。数值使用 INTEGER 字节或 REAL 比例，不保存带单位字符串。</p>
+<h3>process_sample</h3><table><tr><th>核心字段</th><th>说明</th></tr><tr><td>snapshot_id, pid, create_time_ms</td><td>联合唯一识别一次进程观测，避免 PID 复用。</td></tr><tr><td>ppid, uid, username, comm, state, threads</td><td>身份与状态。</td></tr><tr><td>cpu_percent, rss_bytes, swap_bytes</td><td>CPU 与内存。</td></tr><tr><td>read_bps, write_bps, read_bytes, write_bytes</td><td>I/O 速率和累积量。</td></tr><tr><td>cmdline_redacted</td><td>TEXT NOT NULL；脱敏后最多 4096 UTF-8 字节。原始命令永不入库。</td></tr><tr><td>cmdline_hash</td><td>完整脱敏后、截断前规范化命令的 SHA-256；不得基于原始命令。</td></tr><tr><td>truncated / redaction_status</td><td>是否截断；脱敏状态为 redacted、no_sensitive_value 或 failed_closed。</td></tr></table>
+<h3>process_rank</h3><p><code>(snapshot_id, pid, create_time_ms, dimension)</code> 为主键，另存 <code>rank</code> 与 <code>value</code>；dimension 限定为 cpu、rss、swap、read、write。</p>
+<h3>user_sample、event 与 service_session</h3><p><code>user_sample</code> 以 snapshot、uid 聚合资源。<code>event</code> 必须包含 <code>lifecycle_id</code>、<code>occurred_at_ms</code>、受限枚举 <code>type</code> 和限长 <code>details_json</code>，可选 <code>snapshot_id</code>；类型包括 oom_observed、sampling_delay、collector_error、retention、collector_started、collector_stopped 和 host_shutdown_observed。<code>service_session</code> 记录同一 boot_id 内采集器的启动、停止与实例版本，不参与生命周期终止判断。</p></section>
+<section><h2>3. 索引</h2><pre><code>UNIQUE lifecycle(host_id, boot_id)
+INDEX snapshot(lifecycle_id, captured_at_ms DESC)
+INDEX process_sample(snapshot_id, cpu_percent DESC)
+INDEX process_sample(snapshot_id, rss_bytes DESC)
+INDEX process_sample(snapshot_id, uid)
+INDEX process_rank(snapshot_id, dimension, rank)
+INDEX event(lifecycle_id, occurred_at_ms DESC)
+INDEX service_session(lifecycle_id, started_at_ms DESC)</code></pre><p>所有子表外键均启用 <code>ON DELETE CASCADE</code>；event.snapshot_id 使用 <code>ON DELETE SET NULL</code>，确保降采样删除快照时保留生命周期事件。不为完整命令行建普通索引。若未来需要搜索，采用显式、可关闭的 FTS 表并计入空间预算。</p></section>
+<section><h2>4. 事务和 SQLite 参数</h2><ul><li>首次建库、创建任何表之前设置固定 page_size 和 <code>auto_vacuum=INCREMENTAL</code>；启用 <code>foreign_keys</code>、WAL 和 busy timeout。</li><li>每个快照使用 <code>BEGIN IMMEDIATE</code> 到 <code>COMMIT</code> 的单事务。HTTP 长查询使用只读连接，写入连接保持单写者。</li><li><code>synchronous</code> 默认 FULL；只有经断电测试验证并由配置显式选择时才允许 NORMAL。</li><li>数据库 schema 使用 <code>PRAGMA user_version</code> 迁移，迁移前检查可用空间。</li><li>设置受预算约束的 <code>journal_size_limit</code> 与 <code>max_page_count</code>。不能承诺文件系统或硬件在断电时绝对不丢失；UI 展示最后成功提交时间。</li></ul></section>
+<section><h2>5. 指标存储语义</h2><table><thead><tr><th>指标</th><th>单位与范围</th><th>缺失规则</th></tr></thead><tbody><tr><td>host_cpu_percent</td><td>REAL，0～100，全机归一化</td><td>首次或读取失败为 null</td></tr><tr><td>process/user cpu_percent</td><td>REAL，单核 100%，可超过 100</td><td>首次、身份变化或无有效间隔为 null</td></tr><tr><td>read_bps/write_bps</td><td>REAL，bytes/s</td><td>首次、计数器回退、权限不足为 null</td></tr><tr><td>RSS/Swap/磁盘</td><td>INTEGER bytes</td><td>不支持或权限不足为 null，不用 0 代替</td></tr><tr><td>时间</td><td>INTEGER Unix ms UTC</td><td>速率差值另用单调时钟计算</td></tr></tbody></table><p>Top-N 排序忽略 null；0 表示成功观测且值确为零。UID 是关联键，username 仅是当时的显示快照。</p></section>
+<section><h2>6. 50 MiB 空间治理</h2><p>配置值是应用受管文件预算，覆盖数据库主文件、<code>-wal</code>、<code>-shm</code> 及同目录临时文件。默认 50 MiB；软阈值默认取预算的 85%。写入安全余量取 2 MiB 与最近观测到的最大完整快照事务体积两倍中的较大值，并随运行更新。</p><ol><li>达到软阈值或剩余空间小于安全余量：停止接受长查询，执行 WAL checkpoint；无活动读事务时使用 TRUNCATE 模式。</li><li>删除最老生命周期中的非末尾高频快照，随后分批执行 incremental vacuum 并重新测量实际文件。</li><li>仍不足时仅保留老生命周期的降采样点、最终窗口和摘要，再按生命周期从旧到新清理普通明细。</li><li>普通明细耗尽后仍超压时，把最老 final 的进程与用户明细清除并标记为 system-only，优先保护最新历史 final；若 final 集合自身超过硬预算，再同样降级最新历史 final。降级后的 system-only 快照可在下一轮被删除，但 lifecycle 元数据和 summary 继续保留。</li><li>若完整快照无法安全提交，先降低 Top N，再降级为 system_sample + user summary；每次降级必须可通过 status 查询。</li><li>连最小快照也无法在预算内提交时暂停持久化、保留内存最新状态并把 <code>persistence_state</code> 暴露为 <code>paused</code>，不得继续尝试写满磁盘。</li></ol><p><code>max_page_count</code> 只约束数据库主文件，不能替代对 WAL/SHM 的实际测量。文件系统分配粒度和异常中断可能造成短暂误差，因此验收以应用停止新增前不越过“预算减安全余量”为准，而不是宣称操作系统层面的绝对字节硬限。容量规划必须根据采样间隔、各维度 Top N 的去重后并集、命令行平均长度和最终窗口计算预计保留时长。</p></section>
+</main><footer><a href="api.html">下一篇：接口设计 →</a></footer></body></html>

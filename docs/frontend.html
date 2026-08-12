@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>前端开发指南 - Reboot Trace</title><style>
+:root {
+  color-scheme: light;
+  --page: #f3f6fb;
+  --surface: #fff;
+  --surface-soft: #f8faff;
+  --ink: #182235;
+  --muted: #647087;
+  --line: #dce3ef;
+  --line-strong: #c7d2e3;
+  --brand: #315cd6;
+  --brand-dark: #173b97;
+  --brand-soft: #eaf0ff;
+  --good: #13795b;
+  --good-soft: #e8f7f1;
+  --warn-soft: #fff4df;
+  --shadow: 0 10px 32px rgba(31,54,92,.07);
+  --radius: 15px;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 82px; }
+body {
+  margin: 0;
+  color: var(--ink);
+  background: radial-gradient(circle at 8% 16%, rgba(76,116,220,.08), transparent 25rem), var(--page);
+  font: 16px/1.75 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+header {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  min-height: 210px;
+  padding: 54px max(24px, calc((100vw - 1080px) / 2)) 48px;
+  color: #fff;
+  background: linear-gradient(120deg, #112f7d 0%, #2455c6 52%, #2086c5 100%);
+}
+header::before, header::after {
+  position: absolute;
+  z-index: -1;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 50%;
+  content: "";
+}
+header::before { width: 340px; height: 340px; top: -220px; right: 7%; }
+header::after { width: 480px; height: 480px; right: -150px; bottom: -390px; }
+header h1 {
+  margin: 0 0 12px;
+  max-width: 900px;
+  font-size: clamp(32px, 5vw, 48px);
+  line-height: 1.15;
+  letter-spacing: -.035em;
+  text-wrap: balance;
+}
+header p { margin: 0; max-width: 850px; color: #e8efff; font-size: 17px; }
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  padding: 9px max(20px, calc((100vw - 1080px) / 2));
+  background: rgba(255,255,255,.92);
+  border-bottom: 1px solid rgba(199,210,227,.85);
+  box-shadow: 0 5px 18px rgba(31,54,92,.045);
+  backdrop-filter: blur(14px);
+  scrollbar-width: none;
+}
+nav::-webkit-scrollbar { display: none; }
+nav a {
+  flex: 0 0 auto;
+  padding: 8px 13px;
+  border-radius: 9px;
+  color: #526078;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 680;
+  transition: color .15s ease, background .15s ease, transform .15s ease;
+}
+nav a:hover { color: var(--brand); background: var(--brand-soft); transform: translateY(-1px); }
+.page-index nav a[href="index.html"],
+.page-requirements nav a[href="requirements.html"],
+.page-architecture nav a[href="architecture.html"],
+.page-database nav a[href="database.html"],
+.page-api nav a[href="api.html"],
+.page-frontend nav a[href="frontend.html"],
+.page-deployment nav a[href="deployment.html"] {
+  color: #fff;
+  background: var(--brand);
+  box-shadow: 0 4px 12px rgba(49,92,214,.24);
+}
+main { max-width: 1080px; margin: 32px auto 68px; padding: 0 24px; }
+section, .card {
+  margin: 20px 0;
+  padding: clamp(22px, 3.2vw, 34px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+section { scroll-margin-top: 78px; }
+section > :first-child { margin-top: 0; }
+section > :last-child { margin-bottom: 0; }
+h2 {
+  margin: 0 0 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: clamp(23px, 3vw, 28px);
+  line-height: 1.3;
+  letter-spacing: -.02em;
+}
+h3 { margin: 30px 0 10px; color: #263650; font-size: 19px; line-height: 1.4; }
+p { margin: 10px 0 16px; }
+ul, ol { padding-left: 1.45rem; }
+li { margin: 7px 0; padding-left: .2rem; }
+li::marker { color: var(--brand); font-weight: 700; }
+a { color: var(--brand); text-underline-offset: 3px; }
+a:hover { color: var(--brand-dark); }
+strong { color: #223454; }
+table {
+  width: 100%;
+  margin: 18px 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: 11px;
+  font-size: 14px;
+}
+th, td { padding: 12px 14px; border: 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th + th, td + td { border-left: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { color: #2b477d; background: var(--brand-soft); font-size: 13px; letter-spacing: .025em; }
+tbody tr:nth-child(even) { background: #fafbfe; }
+tbody tr:hover { background: #f4f7ff; }
+code {
+  padding: 2px 6px;
+  border: 1px solid #dbe4f5;
+  border-radius: 5px;
+  color: #244b9f;
+  background: #f1f5fd;
+  font: .88em/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+pre {
+  margin: 18px 0;
+  padding: 20px;
+  overflow: auto;
+  border: 1px solid #23324c;
+  border-radius: 12px;
+  color: #dce7ff;
+  background: linear-gradient(145deg, #111a2a, #17243a);
+  box-shadow: inset 0 1px rgba(255,255,255,.04);
+  line-height: 1.65;
+}
+pre code { padding: 0; border: 0; color: inherit; background: transparent; overflow-wrap: normal; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+.grid .card, .grid > div {
+  margin: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+.grid > div strong { display: block; margin-bottom: 6px; color: var(--brand-dark); font-size: 17px; }
+.grid > div p { margin: 0; color: var(--muted); }
+.note, .warning, .decision { border-left-width: 5px; }
+.note { border-left-color: var(--brand); background: linear-gradient(90deg, var(--brand-soft), #fff 34%); }
+.warning { border-left-color: #e59324; background: linear-gradient(90deg, var(--warn-soft), #fff 34%); }
+.decision { border-left-color: var(--good); background: linear-gradient(90deg, var(--good-soft), #fff 34%); }
+.muted { color: var(--muted); }
+.flow { text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+footer {
+  padding: 34px 24px 44px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  background: rgba(255,255,255,.62);
+  text-align: center;
+}
+footer a {
+  display: inline-block;
+  padding: 10px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: #fff;
+  text-decoration: none;
+  font-weight: 650;
+  box-shadow: 0 4px 14px rgba(31,54,92,.05);
+}
+@media (max-width: 720px) {
+  header { min-height: auto; padding-top: 38px; padding-bottom: 36px; }
+  header p { font-size: 15px; }
+  nav { padding-left: 14px; padding-right: 14px; }
+  main { margin-top: 20px; padding: 0 13px; }
+  section, .card { padding: 20px 17px; border-radius: 12px; }
+  table { display: block; overflow-x: auto; white-space: normal; }
+  th, td { min-width: 130px; }
+  pre { margin-left: -4px; margin-right: -4px; padding: 16px; font-size: 12px; }
+}
+@media print {
+  :root { --page: #fff; --shadow: none; }
+  body { background: #fff; font-size: 11pt; }
+  header { min-height: 0; padding: 24px; color: var(--ink); background: #fff; border-bottom: 2px solid var(--brand); }
+  header p { color: var(--muted); }
+  nav { display: none; }
+  main { max-width: none; margin: 0; padding: 0; }
+  section, .card { break-inside: avoid; margin: 16px 0; padding: 18px 0; border: 0; border-bottom: 1px solid var(--line); box-shadow: none; }
+  pre { white-space: pre-wrap; }
+  footer { display: none; }
+  a { color: inherit; text-decoration: none; }
+}
+</style></head>
+<body class="page-frontend"><header><h1>前端功能、交互与样式指南</h1><p>用于指导 Vue 前端实现多跳板机监控、生命周期浏览和重启前证据分析，确保信息清晰、状态可信且操作一致。</p></header>
+<nav><a href="index.html">首页</a><a href="requirements.html">需求</a><a href="architecture.html">架构</a><a href="database.html">数据库</a><a href="api.html">接口</a><a href="frontend.html">前端</a><a href="deployment.html">部署</a></nav>
+<main>
+<section class="decision"><h2>1. 产品原则</h2><div class="grid">
+<div><strong>证据优先</strong><p>默认展示事实、时间和数据完整度，不自动断言重启根因。</p></div>
+<div><strong>生命周期优先</strong><p>所有历史分析都明确所属主机、boot_id 和采样时间。</p></div>
+<div><strong>局部故障隔离</strong><p>一个后端失败不影响其他主机，错误必须落到具体节点。</p></div>
+<div><strong>渐进披露</strong><p>先显示系统摘要，再按需展开用户、进程以及脱敏且可能截断的命令。</p></div>
+</div></section>
+
+<section><h2>2. 技术基线</h2><ul>
+<li>Vue 3、TypeScript、Vite；使用 Composition API 和 <code>&lt;script setup&gt;</code>。</li>
+<li>Vue Router 管理页面状态，Pinia 仅保存跨页面共享的后端配置和用户偏好。</li>
+<li>请求层按 Ingress 后端实例创建无凭证 client，使用 <code>credentials: "omit"</code>，并统一处理超时、取消、CORS、Ingress 错误和后端错误结构。</li>
+<li>图表推荐 ECharts；表格采用支持虚拟滚动、固定列和键盘操作的组件。</li>
+<li>时间在网络和状态层保持 Unix 毫秒 UTC，只在展示层转换为用户时区。</li>
+<li>前端不得承担权威持久化；Local Storage 只保存筛选条件、主题和列偏好等非敏感信息。</li>
+</ul></section>
+
+<section><h2>3. 信息架构与路由</h2><table><thead><tr><th>路由</th><th>页面</th><th>核心任务</th></tr></thead><tbody>
+<tr><td><code>/</code></td><td>多主机总览</td><td>发现离线、资源压力、采样中断和最近异常生命周期。</td></tr>
+<tr><td><code>/hosts/:backendId</code></td><td>主机详情</td><td>查看当前状态、存储、采集能力和生命周期列表。</td></tr>
+<tr><td><code>/hosts/:backendId/lifecycles/:bootId</code></td><td>生命周期详情</td><td>分析趋势、事件、用户和进程排行。</td></tr>
+<tr><td><code>.../final</code></td><td>最终证据</td><td>聚焦生命周期末尾快照和证据缺口。</td></tr>
+<tr><td><code>.../compare?left=&amp;right=</code></td><td>快照对比</td><td>识别新增、退出和资源增长最快的进程或用户。</td></tr>
+<tr><td><code>/settings</code></td><td>前端设置</td><td>查看已加载后端、时区、刷新周期和显示偏好。</td></tr>
+</tbody></table><p>路由必须携带 <code>backendId</code>，不能只使用 boot_id，因为不同后端的数据彼此独立。筛选、时间范围、排序和选中快照应尽量同步到 URL，保证刷新和分享后可恢复。</p></section>
+
+<section><h2>4. 全局应用框架</h2><pre class="flow">┌ 顶栏：产品名 / 全局时间显示 / 刷新状态 / 设置 ┐
+├ 侧栏：全部主机、在线状态、主机搜索与分组       ┤
+│ ┌ 页面标题 / 主机 / boot_id / 数据完整度 ───┐ │
+│ │ 摘要卡片                                   │ │
+│ │ 趋势、排行、事件或对比主内容               │ │
+│ └────────────────────────────────────────────┘ │
+└ 状态区：后端错误、采样延迟、存储压力提示 ─────┘</pre>
+<ul><li>桌面端侧栏宽 240～280px，可折叠；移动端改为抽屉。</li><li>页面标题下方固定展示面包屑、主机名、生命周期状态和数据时间范围。</li><li>全局刷新按钮必须显示“正在刷新”和“最后完成时间”，避免重复触发并发请求。</li><li>轮询仅更新当前可见页面；标签页隐藏时暂停高频刷新，恢复时立即刷新一次。</li></ul></section>
+
+<section><h2>5. 多主机总览</h2><h3>5.1 主机状态卡</h3><p>每台后端并行请求 <code>/status</code> 和 <code>/latest</code>，显示主机名、连接状态、当前 boot_id 缩写、uptime、最后落盘时间、采样延迟、CPU、可用内存、PSI 和存储使用率。任一请求成功时展示可用部分，不能因另一请求失败清空整张卡。卡片整体可进入主机详情，但卡内按钮必须有独立点击区域。</p>
+<h3>5.2 排序与筛选</h3><ul><li>默认优先级：不可达 → 采样严重延迟 → 存储压力 → 高 PSI → 正常。</li><li>支持按名称搜索，并按在线状态、生命周期状态和能力筛选。</li><li>主机比较必须标明指标时间，时间差超过两个采样周期时不得用颜色暗示精确横向排名。</li></ul>
+<h3>5.3 并行请求</h3><p>对所有后端执行独立请求，采用 <code>Promise.allSettled</code> 语义。每张卡拥有自己的 skeleton、成功、空数据、超时、未授权和版本不兼容状态。总览顶部汇总“成功 N / 总数 M”，但不以全屏错误覆盖成功节点。</p></section>
+
+<section><h2>6. 生命周期详情</h2><h3>6.1 顶部摘要</h3><ul><li>启动时间、最后观察时间、持续时长、终止状态和快照数量。</li><li>最后成功提交时间及可能的证据缺口；未知值显示“无法确定”，不得显示为 0。</li><li>数据保留完整度：完整、已降采样、仅摘要或部分清理。</li></ul>
+<h3>6.2 时间轴</h3><ul><li>默认打开生命周期结束前 10 分钟；活动生命周期默认最近 10 分钟。</li><li>图表分组为 CPU/Load、内存/Swap、PSI、I/O、进程与线程；共享十字游标和缩放范围。</li><li>在时间轴叠加 OOM、采样延迟、采集错误和保留清理事件标记。</li><li>点击任意采样点选择快照，并联动下方用户及进程排行；若降采样无完整快照则明确禁用明细。</li></ul>
+<h3>6.3 排行区域</h3><p>CPU、RSS、Swap、读取、写入使用标签页切换，各自维护排序含义。表格至少包含排名、用户、PID、进程名、资源值、线程数、状态和命令摘要。PID 必须与创建时间共同作为前端行键。</p></section>
+
+<section><h2>7. 最终证据页面</h2><p>这是取证的默认落点，应减少装饰并提高信息密度：</p><ol>
+<li>顶部说明生命周期终止类型、最终完整快照时间和最后观察时间。</li>
+<li>展示 CPU、可用内存、Swap、Load、三类 PSI、采样漂移等系统证据。</li>
+<li>并列展示各维度 Top 进程与用户汇总，允许切换最后 1、3、5、10 个快照。</li>
+<li>提供“查看前后变化”入口，自动用最终快照与前一个有效快照比较。</li>
+</ol><p class="muted">页面措辞使用“观察到”“最后记录”“可能存在压力”，禁止使用“导致重启”“根因是”等未经人工确认的结论。</p></section>
+
+<section><h2>8. 快照对比交互</h2><ul>
+<li>左右时间点通过时间轴或下拉框选择，默认右侧晚于左侧；交换按钮可互换。</li>
+<li>摘要显示系统指标差值，并标注绝对值和百分比；基数为零时不计算百分比。</li>
+<li>进程按 <code>pid + create_time_ms</code> 匹配，分为新增、退出、持续和 PID 复用。</li>
+<li>默认突出 RSS、Swap、I/O 或 CPU 增幅最大的条目，而不是只看最终绝对排名。</li>
+<li>对比请求变更时取消上一次请求，防止较慢响应覆盖较新选择。</li>
+</ul></section>
+
+<section><h2>9. 通用交互状态</h2><table><thead><tr><th>状态</th><th>表现</th><th>操作</th></tr></thead><tbody>
+<tr><td>首次加载</td><td>保持布局的 skeleton，不用全屏旋转图标。</td><td>无。</td></tr>
+<tr><td>后台刷新</td><td>保留旧数据，在局部显示刷新标识。</td><td>允许取消或等待。</td></tr>
+<tr><td>空数据</td><td>说明是无采样、被清理、能力不支持还是筛选无结果。</td><td>提供清除筛选或返回入口。</td></tr>
+<tr><td>超时/离线</td><td>显示对应后端、上次成功时间和缓存视图的陈旧标记。</td><td>重试当前节点。</td></tr>
+<tr><td>Ingress 401/403</td><td>视为网络入口策略拒绝，不显示登录入口，也不循环自动重试。</td><td>提示检查 Ingress 或网络策略。</td></tr>
+<tr><td>版本不兼容</td><td>显示前后端版本和受影响功能。</td><td>仍允许访问兼容页面。</td></tr>
+<tr><td>部分数据</td><td>黄色数据完整度提示，缺失字段显示短横线。</td><td>查看能力或保留说明。</td></tr>
+</tbody></table></section>
+
+<section><h2>10. 视觉规范</h2><h3>10.1 色彩语义</h3><table><tr><th>语义</th><th>建议</th><th>用途</th></tr><tr><td>品牌蓝</td><td><code>#315CD6</code></td><td>主操作、选中状态、链接。</td></tr><tr><td>正常绿</td><td><code>#13795B</code></td><td>在线、成功；不表示“无风险”。</td></tr><tr><td>提醒橙</td><td><code>#E59324</code></td><td>采样延迟、空间逼近阈值、部分数据。</td></tr><tr><td>错误红</td><td><code>#C73E4D</code></td><td>请求失败、数据不可用、硬阈值。</td></tr><tr><td>中性灰</td><td><code>#647087</code></td><td>未知、未支持、次要信息。</td></tr></table>
+<p>颜色不能是唯一的信息载体，必须配合文本、图标或形状。资源使用率的颜色阈值由后端或配置提供，前端不得散落硬编码。</p>
+<h3>10.2 排版与间距</h3><ul><li>基础字号 16px，表格最小 13px；数值使用等宽数字特性。</li><li>采用 4px 间距基准；主要卡片内边距 20～24px，卡片间距 16px。</li><li>长 boot_id 默认显示前 8 位并支持复制完整值；命令行单行省略，详情用可换行等宽文本。</li></ul>
+<h3>10.3 图表</h3><ul><li>图例、坐标轴和 tooltip 必须带单位，字节采用 IEC 单位（KiB、MiB、GiB）。</li><li>同一指标跨页面保持颜色一致；PSI some/full 使用同色不同明度或线型。</li><li>时间缺口必须断线，禁止用插值连接离线时段。</li><li>大量序列默认只显示 Top N，用户主动选择后才叠加其他进程。</li></ul></section>
+
+<section><h2>11. 响应式与无障碍</h2><ul>
+<li>断点建议：小于 768px 为单栏，768～1199px 为紧凑布局，1200px 以上展开侧栏和多列卡片。</li>
+<li>移动端表格切换为关键字段卡片或提供明确横向滚动，不把命令行挤成逐字换行。</li>
+<li>所有功能可用键盘完成；可见焦点、语义化标题、表头关联和表单 label 必须保留。</li>
+<li>正文与背景对比度至少 4.5:1；图表提供文本摘要或数据表。</li>
+<li>尊重 <code>prefers-reduced-motion</code>，轮询更新不触发大面积动画或布局跳动。</li>
+<li>动态错误和刷新完成状态使用恰当的 aria-live，避免频繁朗读每次采样。</li>
+</ul></section>
+
+<section><h2>12. 状态与请求模型</h2><pre><code>BackendConfig { id, name, baseUrl }
+BackendRuntime { status, version, hostId, lastSuccessAt, error }
+PageQuery { backendId, bootId, fromMs, toMs, resolution, filters }
+AsyncState&lt;T&gt; { state: idle|loading|success|error, data?, error?, stale }
+</code></pre><ul>
+<li>请求缓存键必须包含 backendId、bootId、时间范围、分辨率及所有筛选条件。</li>
+<li>路由切换、筛选变化和组件卸载时使用 AbortController 取消请求。</li>
+<li>后台刷新可以保留旧数据并标记 stale；切换主机时不得闪现上一主机的数据。</li>
+<li>后端返回未知枚举或新增字段时保持前向兼容，并记录可诊断日志。</li>
+<li>状态标签严格映射 API：<code>clean_shutdown_observed</code> 显示“观察到正常关机证据”，<code>unclean_or_unknown</code> 显示“未观察到正常收尾或原因未知”；不得缩写成“异常重启”。</li>
+</ul></section>
+
+<section><h2>13. 性能与安全</h2><ul>
+<li>生命周期和进程列表始终使用 cursor 分页；单页最多渲染 200 行，继续浏览使用“加载更多”，图表限制点数并请求服务端降采样。</li>
+<li>同时请求多个后端时设置并发上限和每节点超时，离线节点使用退避策略。</li>
+<li>任何命令行、用户名和服务端消息均按纯文本渲染，禁止使用未经净化的 <code>v-html</code>。</li>
+<li>运行时配置是公开资源，不包含 Token。请求不得携带 Authorization 或 Cookie；所有后端 baseUrl 必须使用 HTTPS Ingress 地址。</li>
+<li>命令行只按纯文本显示 <code>cmdline_redacted</code>；当 truncated 或 redaction_status 为 failed_closed 时给出明确提示，不提供查看原文操作。</li>
+<li>页面卸载时清理定时器、图表实例和事件监听，避免长期值守页面内存增长。</li>
+</ul></section>
+
+<section><h2>14. 组件建议</h2><table><thead><tr><th>组件</th><th>职责</th></tr></thead><tbody>
+<tr><td>BackendStatusBadge</td><td>统一展示在线、超时、未授权和版本不兼容。</td></tr>
+<tr><td>HostSelector</td><td>搜索、分组并选择配置的后端。</td></tr>
+<tr><td>LifecycleHeader</td><td>展示 boot_id、状态、时间和数据完整度。</td></tr>
+<tr><td>MetricCard</td><td>当前值、单位、采样时间、可选趋势和状态说明。</td></tr>
+<tr><td>TimelineChart</td><td>统一缩放、十字游标、事件标记和缺口呈现。</td></tr>
+<tr><td>ProcessRankTable</td><td>多维排行、分页、复制和命令详情。</td></tr>
+<tr><td>EvidenceNotice</td><td>统一呈现证据限制，避免根因断言。</td></tr>
+<tr><td>AsyncBoundary</td><td>统一加载、空、错误、部分成功和重试交互。</td></tr>
+</tbody></table></section>
+
+<section><h2>15. 测试与验收</h2><ul>
+<li>单元测试覆盖单位格式化、时间转换、证据缺口、枚举回退和进程身份匹配。</li>
+<li>组件测试覆盖 loading、empty、partial、error、stale 和权限状态。</li>
+<li>端到端测试至少包含两个成功后端、一个离线后端、生命周期切换和快照对比。</li>
+<li>验证深链接刷新、浏览器前进后退和 URL 筛选恢复。</li>
+<li>用大数据集验证表格与图表性能，用窄屏和键盘完成核心取证流程。</li>
+<li>验收时确认 UI 不会把 unknown 展示为 clean，也不会把高资源占用表述为已确认根因。</li>
+</ul></section>
+</main><footer><a href="deployment.html">下一篇：部署设计 →</a></footer></body></html>

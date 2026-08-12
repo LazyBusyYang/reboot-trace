@@ -1,0 +1,1 @@
+{"backends":[{"id":"dev-01","name":"Maoshanwang_dev_01","baseUrl":"https://dev-01.example/api/v1"},{"id":"dev-02","name":"Maoshanwang_dev_02","baseUrl":"https://dev-02.example/api/v1"}],"requestTimeoutMs":8000,"refreshIntervalMs":5000}

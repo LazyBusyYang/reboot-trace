@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>部署设计 - Reboot Trace</title><style>
+:root {
+  color-scheme: light;
+  --page: #f3f6fb;
+  --surface: #fff;
+  --surface-soft: #f8faff;
+  --ink: #182235;
+  --muted: #647087;
+  --line: #dce3ef;
+  --line-strong: #c7d2e3;
+  --brand: #315cd6;
+  --brand-dark: #173b97;
+  --brand-soft: #eaf0ff;
+  --good: #13795b;
+  --good-soft: #e8f7f1;
+  --warn-soft: #fff4df;
+  --shadow: 0 10px 32px rgba(31,54,92,.07);
+  --radius: 15px;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 82px; }
+body {
+  margin: 0;
+  color: var(--ink);
+  background: radial-gradient(circle at 8% 16%, rgba(76,116,220,.08), transparent 25rem), var(--page);
+  font: 16px/1.75 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+header {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  min-height: 210px;
+  padding: 54px max(24px, calc((100vw - 1080px) / 2)) 48px;
+  color: #fff;
+  background: linear-gradient(120deg, #112f7d 0%, #2455c6 52%, #2086c5 100%);
+}
+header::before, header::after {
+  position: absolute;
+  z-index: -1;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 50%;
+  content: "";
+}
+header::before { width: 340px; height: 340px; top: -220px; right: 7%; }
+header::after { width: 480px; height: 480px; right: -150px; bottom: -390px; }
+header h1 {
+  margin: 0 0 12px;
+  max-width: 900px;
+  font-size: clamp(32px, 5vw, 48px);
+  line-height: 1.15;
+  letter-spacing: -.035em;
+  text-wrap: balance;
+}
+header p { margin: 0; max-width: 850px; color: #e8efff; font-size: 17px; }
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  padding: 9px max(20px, calc((100vw - 1080px) / 2));
+  background: rgba(255,255,255,.92);
+  border-bottom: 1px solid rgba(199,210,227,.85);
+  box-shadow: 0 5px 18px rgba(31,54,92,.045);
+  backdrop-filter: blur(14px);
+  scrollbar-width: none;
+}
+nav::-webkit-scrollbar { display: none; }
+nav a {
+  flex: 0 0 auto;
+  padding: 8px 13px;
+  border-radius: 9px;
+  color: #526078;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 680;
+  transition: color .15s ease, background .15s ease, transform .15s ease;
+}
+nav a:hover { color: var(--brand); background: var(--brand-soft); transform: translateY(-1px); }
+.page-index nav a[href="index.html"],
+.page-requirements nav a[href="requirements.html"],
+.page-architecture nav a[href="architecture.html"],
+.page-database nav a[href="database.html"],
+.page-api nav a[href="api.html"],
+.page-frontend nav a[href="frontend.html"],
+.page-deployment nav a[href="deployment.html"] {
+  color: #fff;
+  background: var(--brand);
+  box-shadow: 0 4px 12px rgba(49,92,214,.24);
+}
+main { max-width: 1080px; margin: 32px auto 68px; padding: 0 24px; }
+section, .card {
+  margin: 20px 0;
+  padding: clamp(22px, 3.2vw, 34px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+section { scroll-margin-top: 78px; }
+section > :first-child { margin-top: 0; }
+section > :last-child { margin-bottom: 0; }
+h2 {
+  margin: 0 0 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: clamp(23px, 3vw, 28px);
+  line-height: 1.3;
+  letter-spacing: -.02em;
+}
+h3 { margin: 30px 0 10px; color: #263650; font-size: 19px; line-height: 1.4; }
+p { margin: 10px 0 16px; }
+ul, ol { padding-left: 1.45rem; }
+li { margin: 7px 0; padding-left: .2rem; }
+li::marker { color: var(--brand); font-weight: 700; }
+a { color: var(--brand); text-underline-offset: 3px; }
+a:hover { color: var(--brand-dark); }
+strong { color: #223454; }
+table {
+  width: 100%;
+  margin: 18px 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: 11px;
+  font-size: 14px;
+}
+th, td { padding: 12px 14px; border: 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th + th, td + td { border-left: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { color: #2b477d; background: var(--brand-soft); font-size: 13px; letter-spacing: .025em; }
+tbody tr:nth-child(even) { background: #fafbfe; }
+tbody tr:hover { background: #f4f7ff; }
+code {
+  padding: 2px 6px;
+  border: 1px solid #dbe4f5;
+  border-radius: 5px;
+  color: #244b9f;
+  background: #f1f5fd;
+  font: .88em/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+pre {
+  margin: 18px 0;
+  padding: 20px;
+  overflow: auto;
+  border: 1px solid #23324c;
+  border-radius: 12px;
+  color: #dce7ff;
+  background: linear-gradient(145deg, #111a2a, #17243a);
+  box-shadow: inset 0 1px rgba(255,255,255,.04);
+  line-height: 1.65;
+}
+pre code { padding: 0; border: 0; color: inherit; background: transparent; overflow-wrap: normal; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+.grid .card, .grid > div {
+  margin: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+.grid > div strong { display: block; margin-bottom: 6px; color: var(--brand-dark); font-size: 17px; }
+.grid > div p { margin: 0; color: var(--muted); }
+.note, .warning, .decision { border-left-width: 5px; }
+.note { border-left-color: var(--brand); background: linear-gradient(90deg, var(--brand-soft), #fff 34%); }
+.warning { border-left-color: #e59324; background: linear-gradient(90deg, var(--warn-soft), #fff 34%); }
+.decision { border-left-color: var(--good); background: linear-gradient(90deg, var(--good-soft), #fff 34%); }
+.muted { color: var(--muted); }
+.flow { text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+footer {
+  padding: 34px 24px 44px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  background: rgba(255,255,255,.62);
+  text-align: center;
+}
+footer a {
+  display: inline-block;
+  padding: 10px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: #fff;
+  text-decoration: none;
+  font-weight: 650;
+  box-shadow: 0 4px 14px rgba(31,54,92,.05);
+}
+@media (max-width: 720px) {
+  header { min-height: auto; padding-top: 38px; padding-bottom: 36px; }
+  header p { font-size: 15px; }
+  nav { padding-left: 14px; padding-right: 14px; }
+  main { margin-top: 20px; padding: 0 13px; }
+  section, .card { padding: 20px 17px; border-radius: 12px; }
+  table { display: block; overflow-x: auto; white-space: normal; }
+  th, td { min-width: 130px; }
+  pre { margin-left: -4px; margin-right: -4px; padding: 16px; font-size: 12px; }
+}
+@media print {
+  :root { --page: #fff; --shadow: none; }
+  body { background: #fff; font-size: 11pt; }
+  header { min-height: 0; padding: 24px; color: var(--ink); background: #fff; border-bottom: 2px solid var(--brand); }
+  header p { color: var(--muted); }
+  nav { display: none; }
+  main { max-width: none; margin: 0; padding: 0; }
+  section, .card { break-inside: avoid; margin: 16px 0; padding: 18px 0; border: 0; border-bottom: 1px solid var(--line); box-shadow: none; }
+  pre { white-space: pre-wrap; }
+  footer { display: none; }
+  a { color: inherit; text-decoration: none; }
+}
+</style></head>
+<body class="page-deployment"><header><h1>镜像与部署设计</h1><p>前端、后端分别构建和发布；后端随跳板机部署，前端可独立指向多个后端。</p></header>
+<nav><a href="index.html">首页</a><a href="requirements.html">需求</a><a href="architecture.html">架构</a><a href="database.html">数据库</a><a href="api.html">接口</a><a href="frontend.html">前端</a><a href="deployment.html">部署</a></nav>
+<main>
+<section><h2>1. 交付物</h2><pre><code>backend/Dockerfile
+frontend/Dockerfile
+deploy/compose.example.yaml
+deploy/runtime-config.example.json
+</code></pre><p>两个 Dockerfile 都应支持固定依赖版本、非 root 应用用户、多阶段构建、OCI 标签和健康检查。项目不把 SQLite 文件烘焙进镜像。</p></section>
+<section><h2>2. 后端镜像要求</h2><ul><li>基于精简 Python 镜像，安装锁定依赖后复制应用代码。</li><li>数据目录默认 <code>/var/lib/reboot-trace</code>，必须挂载持久卷；数据库、host_id 和迁移状态位于该卷。</li><li>监听 <code>0.0.0.0:8080</code>；健康检查访问 <code>/health/ready</code>。</li><li>容器停止信号触发优雅关闭、完成或回滚当前事务并记录 <code>collector_stopped</code>；不得据此终结 boot_id 生命周期或标记主机 clean shutdown。</li><li>只读根文件系统，临时文件使用受限 tmpfs；日志输出 stdout/stderr。</li></ul>
+<h3>关键环境变量</h3><table><tr><th>变量</th><th>默认</th><th>说明</th></tr>
+<tr><td>RT_DATA_DIR</td><td>/var/lib/reboot-trace</td><td>持久化目录。</td></tr><tr><td>RT_STORAGE_LIMIT_MIB</td><td>50</td><td>DB、WAL、SHM 和临时文件的受管预算。</td></tr><tr><td>RT_SAMPLE_INTERVAL_SECONDS</td><td>5</td><td>采样周期。</td></tr><tr><td>RT_PROCESS_TOP_N</td><td>50</td><td>各维度排行数量，允许 1～500，避免配置放大采集器开销。</td></tr><tr><td>RT_CMDLINE_MAX_BYTES</td><td>4096</td><td>脱敏后最大命令长度；可调小，不得超过 4096。</td></tr><tr><td>RT_PROC_ROOT</td><td>/host/proc</td><td>宿主机 procfs；当前版本的系统与进程指标均由此读取。</td></tr><tr><td>RT_HOST_PASSWD</td><td>/host/etc/passwd</td><td>可选的宿主机 UID 显示名来源；失败时保留 UID。</td></tr><tr><td>RT_CORS_ORIGINS</td><td>无默认</td><td>必填的逗号分隔前端精确 Origin；生产禁止 <code>*</code>。</td></tr></table></section>
+<section class="warning"><h2>3. 宿主机可见性</h2><p>普通隔离容器默认只能看到容器自身进程，无法完成跳板机取证。Linux 部署必须显式提供宿主机视图：</p><ul><li>使用 host PID namespace（例如 Compose 的 <code>pid: host</code>）。</li><li>只读挂载宿主机 <code>/proc</code>；CPU、内存、PSI、进程、mountinfo 和 boot_id 均从配置的 proc root 读取，禁止无声回退到容器自身视图。</li><li>UID 是权威用户标识。可只读挂载宿主机 <code>/etc/passwd</code> 到单个文件路径用于 best-effort username；不得挂载 shadow，NSS/LDAP 用户无法解析时显示 UID。</li><li>磁盘和 inode 只统计后端明确配置或由宿主机 mountinfo 发现并允许的宿主机文件系统，排除 proc、sysfs、tmpfs、overlay 等伪文件系统；响应 capabilities 说明被排除或不可读的范围。</li><li>默认丢弃全部 capabilities，再按目标机验证结果增加 <code>SYS_PTRACE</code> 与 <code>DAC_READ_SEARCH</code>，用于读取其他 UID 的受保护 procfs 字段。若安全策略不允许，采集器必须保留可读的 RSS/身份证据，把 I/O 或命令字段置为不可用，不得丢弃整个进程。</li><li>不要使用 <code>--privileged</code>。在目标发行版验证 procfs hidepid、SELinux/AppArmor、cgroup v1/v2 与容器运行时限制。</li></ul><p>若组织安全策略不允许上述访问，应使用宿主机 systemd 直接运行后端；“提供镜像”不能凌驾于正确的可见性和最小权限。</p></section>
+<section><h2>4. 前端镜像与运行时配置</h2><p>Vue 在构建阶段生成静态文件，由轻量 Web 服务器提供。容器启动时从部署系统挂载的 <code>/usr/share/nginx/html/config/runtime-config.json</code> 加载后端列表，无需重建镜像；该文件必须设置 <code>Cache-Control: no-store</code>，JS bundle 可使用长期缓存。</p><pre><code>{
+  "backends": [
+    {"id":"dev-01","name":"Maoshanwang_dev_01","baseUrl":"https://dev-01.example/api/v1"},
+    {"id":"dev-02","name":"Maoshanwang_dev_02","baseUrl":"https://dev-02.example/api/v1"}
+  ],
+  "requestTimeoutMs": 8000,
+  "refreshIntervalMs": 5000
+}</code></pre><p>配置文件是公开静态资源，不包含密钥。baseUrl 直接指向各主机 HTTPS Ingress；前端不做代理，也不携带登录凭证。每个后端的 <code>RT_CORS_ORIGINS</code> 必须包含该前端页面的精确 Origin。</p></section>
+<section><h2>5. Ingress 与跨域合同</h2><ul><li>每个后端通过独立 HTTPS Ingress hostname 暴露，TLS 证书由 Ingress 管理。</li><li>后端应用不做登录鉴权；Ingress/NetworkPolicy/防火墙将服务限制在受控运维网络。不得将无鉴权接口暴露到公共互联网。</li><li>OPTIONS 预检和 GET 请求必须路由到后端；允许 Origin 来自 <code>RT_CORS_ORIGINS</code> 精确集合，credentials=false。</li><li>前端以 <code>credentials: "omit"</code> 请求，不发送 Authorization。Ingress 自身产生的错误可能是 HTML 或非标准 JSON，前端按 HTTP 状态处理。</li></ul></section>
+<section><h2>6. Compose 目标形态</h2><pre><code>services:
+  backend:
+    image: reboot-trace-backend:&lt;version&gt;
+    pid: host
+    cap_drop: [ALL]
+    cap_add: [SYS_PTRACE, DAC_READ_SEARCH]
+    volumes:
+      - reboot-trace-data:/var/lib/reboot-trace
+      - /proc:/host/proc:ro
+      - /etc/passwd:/host/etc/passwd:ro
+    environment:
+      RT_PROC_ROOT: /host/proc
+      RT_HOST_PASSWD: /host/etc/passwd
+      RT_STORAGE_LIMIT_MIB: "50"
+    restart: unless-stopped
+
+  frontend:
+    image: reboot-trace-frontend:&lt;version&gt;
+    volumes:
+      - ./runtime-config.json:/usr/share/nginx/html/config/runtime-config.json:ro
+    ports:
+      - "8088:8080"
+    read_only: true
+    tmpfs: [/tmp]
+</code></pre><p>这是设计示例，不应在未验证目标主机安全配置前直接复制到生产。实际可让所有后端各自在跳板机运行，仅在运维入口部署一个前端。</p></section>
+<section><h2>7. 升级、备份和运行</h2><ul><li>升级镜像前备份数据卷；启动时自动执行向前兼容迁移，失败必须保持旧数据库可恢复。</li><li>滚动更新只影响对应主机后端，前端继续展示其他节点并标注该节点短暂离线；boot_id 未变化时升级前后属于同一生命周期。</li><li>host_id 位于持久卷；重建容器后不变。复制数据卷到另一主机时必须显式重新绑定身份。</li><li>前端与后端通过 <code>api_version</code>、<code>schema_version</code> 和 <code>backend_version</code> 协商；前端应提示不兼容后端，而不是静默展示错误数据。</li><li>后端自身设置 CPU、内存和日志限制，但资源限额不能低到在主机压力发生时首先被终止；部署时调整 OOM 优先级。</li></ul></section>
+<section><h2>8. 上线检查清单</h2><ul><li>验证后端确实看到宿主机 PID 和 boot_id。</li><li>模拟服务重启与主机重启，确认生命周期不覆盖。</li><li>强制终止写入进程，运行 SQLite integrity check 并验证最后完整快照。</li><li>以小预算压测淘汰策略，核对 DB + WAL + SHM 未持续越界。</li><li>从前端测试多个 Ingress 后端、单节点超时、允许/拒绝 Origin、Ingress 非 JSON 错误和版本不兼容。</li><li>验证浏览器请求不携带 Cookie/Authorization，并确认非受控网络无法访问 Ingress。</li><li>用包含 token、password、URI 凭证和超长参数的进程验证数据库、API、事件及日志只出现脱敏且不超过 4096 字节的命令。</li></ul></section>
+</main><footer><a href="index.html">返回文档首页</a></footer></body></html>

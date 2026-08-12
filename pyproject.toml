@@ -1,0 +1,26 @@
+[project]
+name = "reboot-trace"
+version = "0.1.0"
+description = "Bounded local evidence collector for Linux reboot investigations"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.136.3",
+  "uvicorn[standard]==0.49.0",
+  "pydantic==2.13.4",
+]
+
+[project.optional-dependencies]
+test = ["httpx==0.28.1", "pytest==9.0.3"]
+
+[project.scripts]
+reboot-trace = "reboot_trace.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/reboot_trace"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
