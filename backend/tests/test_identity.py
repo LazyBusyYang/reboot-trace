@@ -5,7 +5,7 @@ from pathlib import Path
 import uuid
 
 import reboot_trace.identity as identity_module
-from reboot_trace.identity import IdentityReader
+from reboot_trace.identity import IdentityReader,namespace_evidence
 
 
 def test_instance_marker_is_created_atomically_and_reused(settings):
@@ -81,6 +81,60 @@ def test_namespace_mismatch_disables_confirmed_marker(settings):
     assert identity.marker_state == "unsupported"
     assert identity.namespace_state == "unsupported"
     assert "different mnt namespaces" in identity.namespace_reason
+
+
+def deny_pid1_namespace_stat(settings,monkeypatch):
+    original=Path.stat
+    denied={settings.proc_root/"1/ns/pid",settings.proc_root/"1/ns/mnt"}
+    def stat_path(path,*args,**kwargs):
+        if path in denied:
+            raise PermissionError(13,"permission denied",str(path))
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(Path,"stat",stat_path)
+
+
+def test_namespace_permission_fallback_accepts_matching_views(settings,monkeypatch):
+    deny_pid1_namespace_stat(settings,monkeypatch)
+    evidence=namespace_evidence(settings.proc_root)
+    identity=IdentityReader(settings).read()
+    assert evidence.aligned is True
+    assert evidence.pid_identity and evidence.pid_identity>0
+    assert "NSpid and mountinfo" in evidence.reason
+    assert evidence.pid_identity==(settings.proc_root/"self/ns/pid").stat().st_ino
+    assert identity.marker_state=="supported"
+    assert identity.namespace_state=="supported"
+    assert identity.pid_namespace_inode==evidence.pid_identity
+
+
+def test_namespace_permission_fallback_rejects_nspid_depth_mismatch(settings,monkeypatch):
+    (settings.proc_root/"self/status").write_text("Pid:\t123\nNSpid:\t1000\t123\n")
+    deny_pid1_namespace_stat(settings,monkeypatch)
+    evidence=namespace_evidence(settings.proc_root)
+    assert evidence.aligned is False
+    assert "incompatible NSpid chains" in evidence.reason
+    assert IdentityReader(settings).read().marker_state=="unsupported"
+
+
+def test_namespace_permission_fallback_rejects_different_mount_views(settings,monkeypatch):
+    mountinfo=settings.proc_root/"self/mountinfo"
+    mountinfo.write_text(mountinfo.read_text().replace("overlay overlay","overlay different-overlay"))
+    deny_pid1_namespace_stat(settings,monkeypatch)
+    evidence=namespace_evidence(settings.proc_root)
+    assert evidence.aligned is False
+    assert "mountinfo views differ" in evidence.reason
+
+
+def test_namespace_nonpermission_error_remains_fail_closed(settings,monkeypatch):
+    original=Path.stat
+    target=settings.proc_root/"1/ns/pid"
+    def stat_path(path,*args,**kwargs):
+        if path==target:
+            raise OSError(5,"I/O error",str(path))
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(Path,"stat",stat_path)
+    evidence=namespace_evidence(settings.proc_root)
+    assert evidence.aligned is False
+    assert "OSError" in evidence.reason
 
 
 def test_marker_parent_symlink_to_persistent_mount_is_rejected(settings,monkeypatch):

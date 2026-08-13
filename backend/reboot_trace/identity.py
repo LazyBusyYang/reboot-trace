@@ -28,11 +28,16 @@ def _pid1_start_ticks(proc_root: Path) -> int:
     return int(fields[19])
 
 
-def _pid_namespace_inode(proc_root: Path) -> int:
-    try:
-        return int((proc_root / "1/ns/pid").stat().st_ino)
-    except OSError as exc:
-        raise RuntimeError("cannot read PID 1 namespace inode") from exc
+def _status_nspid(proc_root: Path, process: str) -> tuple[int, ...]:
+    for line in _read(proc_root / process / "status").splitlines():
+        if line.startswith("NSpid:"):
+            try:
+                values=tuple(int(value) for value in line.split()[1:])
+            except ValueError:
+                break
+            if values:
+                return values
+    raise RuntimeError(f"cannot read {process} NSpid")
 
 
 def _cgroup_hash(proc_root: Path) -> str:
@@ -66,16 +71,61 @@ def _mount_identity(proc_root: Path, target: Path) -> MountIdentity | None:
     return best[1] if best else None
 
 
-def _namespace_alignment(proc_root: Path) -> tuple[bool, str | None]:
+def _mountinfo_signature(proc_root: Path, process: str) -> tuple[tuple[str, ...], ...]:
+    signatures=[]
+    for line in _read(proc_root / process / "mountinfo").splitlines():
+        left,separator,right=line.partition(" - ")
+        if not separator:
+            continue
+        fields=left.split();tail=right.split()
+        if len(fields)<6 or len(tail)<3:
+            continue
+        # Mount and parent IDs are namespace-local allocation details. The
+        # remaining fields describe the mounted object and its visible path.
+        signatures.append(tuple(fields[2:])+("-",)+tuple(tail))
+    if not signatures:
+        raise RuntimeError(f"cannot read {process} mountinfo")
+    return tuple(sorted(signatures))
+
+
+@dataclass(frozen=True, slots=True)
+class NamespaceEvidence:
+    aligned: bool
+    reason: str | None
+    pid_identity: int | None
+
+
+def _fallback_namespace_evidence(proc_root: Path) -> NamespaceEvidence:
+    try:
+        pid1_nspid=_status_nspid(proc_root,"1")
+        self_nspid=_status_nspid(proc_root,"self")
+        if pid1_nspid[-1] != 1 or len(pid1_nspid) != len(self_nspid):
+            return NamespaceEvidence(False,"PID namespace views have incompatible NSpid chains",None)
+        if _mountinfo_signature(proc_root,"1") != _mountinfo_signature(proc_root,"self"):
+            return NamespaceEvidence(False,"PID 1 and backend mountinfo views differ",None)
+        pid_identity=int((proc_root/"self/ns/pid").stat().st_ino)
+        return NamespaceEvidence(True,"PID 1 namespace inode access denied; verified with NSpid and mountinfo views",pid_identity)
+    except (RuntimeError,OSError) as exc:
+        return NamespaceEvidence(False,str(exc),None)
+
+
+def namespace_evidence(proc_root: Path) -> NamespaceEvidence:
     try:
         for namespace in ("pid", "mnt"):
             pid1 = (proc_root / "1/ns" / namespace).stat().st_ino
             current = (proc_root / "self/ns" / namespace).stat().st_ino
             if pid1 != current:
-                return False, f"backend and PID 1 use different {namespace} namespaces"
-        return True, None
+                return NamespaceEvidence(False,f"backend and PID 1 use different {namespace} namespaces",None)
+        return NamespaceEvidence(True,None,int((proc_root / "1/ns/pid").stat().st_ino))
+    except PermissionError:
+        return _fallback_namespace_evidence(proc_root)
     except OSError as exc:
-        return False, f"{type(exc).__name__}: cannot verify local container namespaces"
+        return NamespaceEvidence(False,f"{type(exc).__name__}: cannot verify local container namespaces",None)
+
+
+def _namespace_alignment(proc_root: Path) -> tuple[bool, str | None]:
+    evidence=namespace_evidence(proc_root)
+    return evidence.aligned,evidence.reason
 
 
 def _marker_storage(mount: MountIdentity | None) -> tuple[str | None, str | None]:
@@ -226,9 +276,9 @@ class IdentityReader:
         self.settings = settings
 
     def read(self) -> ContainerIdentity:
-        namespaces_aligned, namespace_reason = _namespace_alignment(self.settings.proc_root)
+        namespace=namespace_evidence(self.settings.proc_root)
         marker, marker_state, marker_reason, marker_storage, mount = _load_or_create_marker(
-            self.settings, namespaces_aligned, namespace_reason
+            self.settings, namespace.aligned, namespace.reason
         )
         boot_id = _read(self.settings.proc_root / "sys/kernel/random/boot_id").strip()
         if not boot_id:
@@ -236,7 +286,7 @@ class IdentityReader:
         return ContainerIdentity(
             container_instance_id=marker,
             pid1_start_ticks=_pid1_start_ticks(self.settings.proc_root),
-            pid_namespace_inode=_pid_namespace_inode(self.settings.proc_root),
+            pid_namespace_inode=namespace.pid_identity or 0,
             cgroup_hash=_cgroup_hash(self.settings.proc_root),
             kernel_boot_id=boot_id,
             marker_state=marker_state,
@@ -245,8 +295,8 @@ class IdentityReader:
             marker_storage=marker_storage,
             marker_mountpoint=mount.mountpoint if mount else None,
             marker_fs_type=mount.fs_type if mount else None,
-            namespace_state="supported" if namespaces_aligned else "unsupported",
-            namespace_reason=namespace_reason,
+            namespace_state="supported" if namespace.aligned else "unsupported",
+            namespace_reason=namespace.reason,
         )
 
 

@@ -215,7 +215,7 @@ footer a {
 <body class="page-requirements"><header><h1>项目需求</h1><p>围绕“重启后仍能看到上一个生命周期终止前发生了什么”定义产品能力。</p></header>
 <nav><a href="index.html">首页</a><a href="requirements.html">需求</a><a href="architecture.html">架构</a><a href="database.html">数据库</a><a href="api.html">接口</a><a href="frontend.html">前端</a><a href="deployment.html">部署</a></nav>
 <main>
-<section><h2>1. 背景与目标</h2><p><code>Maoshanwang_dev_*</code> 目标容器频繁断联或重启，怀疑大型程序造成 CPU、内存或 I/O 压力。本项目持续采样、持久化并展示证据，帮助运维人员人工判断原因。</p><p>一次目标容器实例运行定义为一个生命周期。后端作为目标容器内的普通进程运行：根 overlay marker 与 PID 1 start ticks、PID namespace inode、cgroup 哈希共同变化构成确认信号；任一信号单独变化仅为 probable。Linux kernel <code>boot_id</code> 仅作为宿主内核证据。新生命周期不得覆盖旧生命周期。</p></section>
+<section><h2>1. 背景与目标</h2><p><code>Maoshanwang_dev_*</code> 目标容器频繁断联或重启，怀疑大型程序造成 CPU、内存或 I/O 压力。本项目持续采样、持久化并展示证据，帮助运维人员人工判断原因。</p><p>一次目标容器实例运行定义为一个生命周期。后端作为目标容器内的普通进程运行：根 overlay marker 与 PID 1 start ticks、PID namespace inode、cgroup 哈希共同变化构成确认信号；普通用户无法读取 PID 1 namespace inode 时，必须先通过 NSpid 链与 mountinfo 同源验证再使用当前进程可读的同一 PID namespace inode。任一信号单独变化仅为 probable。Linux kernel <code>boot_id</code> 仅作为宿主内核证据。新生命周期不得覆盖旧生命周期。</p></section>
 <section><h2>2. 功能需求</h2>
 <h3>2.1 采集</h3><ul>
 <li>后台周期采集，不在 API 请求过程中扫描全部进程；默认周期建议 5 秒且可配置。</li>

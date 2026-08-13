@@ -103,7 +103,7 @@ check_prerequisites() {
 import os
 import sys
 from pathlib import Path
-from reboot_trace.identity import _mount_identity
+from reboot_trace.identity import _mount_identity, namespace_evidence
 
 data = Path(sys.argv[1]).resolve()
 marker = Path(sys.argv[2])
@@ -111,9 +111,9 @@ limit = int(sys.argv[3]) * 1024 * 1024
 proc = Path("/proc")
 if not data.is_absolute() or not data.is_dir() or not os.access(data, os.R_OK | os.W_OK | os.X_OK):
     raise SystemExit(f"RT_DATA_DIR is not a readable and writable absolute directory: {data}")
-for namespace in ("pid", "mnt"):
-    if (proc/"1/ns"/namespace).stat().st_ino != (proc/"self/ns"/namespace).stat().st_ino:
-        raise SystemExit(f"backend and PID 1 use different {namespace} namespaces")
+namespace = namespace_evidence(proc)
+if not namespace.aligned:
+    raise SystemExit(namespace.reason or "cannot verify local container namespaces")
 data_mount = _mount_identity(proc, data)
 marker_mount = _mount_identity(proc, marker)
 if data_mount is None:

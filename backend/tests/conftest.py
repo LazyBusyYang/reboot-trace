@@ -28,8 +28,12 @@ def settings(tmp_path: Path) -> Settings:
     os.link(proc / "1/ns/mnt", proc / "self/ns/mnt")
     (proc / "1/stat").write_text("1 (init) S 0 0 0 0 0 0 0 0 0 0 1 1 0 0 0 0 1 0 100 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
     (proc / "1/cgroup").write_text("0::/target.slice\n")
+    (proc / "1/status").write_text("Name:\tinit\nPid:\t1\nNSpid:\t1\n")
+    (proc / "self/status").write_text("Name:\tpytest\nPid:\t123\nNSpid:\t123\n")
     data_mount="/"+data.as_posix().lstrip("/")
-    (proc / "1/mountinfo").write_text(f"1 0 0:1 / / rw - overlay overlay rw\n2 1 0:2 / /proc rw - proc proc rw\n4 1 8:1 / {data_mount} rw - ext4 /dev/persist rw\n")
+    mountinfo=f"1 0 0:1 / / rw - overlay overlay rw\n2 1 0:2 / /proc rw - proc proc rw\n4 1 8:1 / {data_mount} rw - ext4 /dev/persist rw\n"
+    (proc / "1/mountinfo").write_text(mountinfo)
+    (proc / "self/mountinfo").write_text(mountinfo)
     for name in ("cpu","memory","io"):
         (proc / "pressure" / name).write_text("some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=0.10 avg60=0.20 avg300=0.30 total=2\n" if name != "cpu" else "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\n")
     passwd=tmp_path/"passwd"; passwd.write_text("alice:x:1000:1000::/home/alice:/bin/bash\n")
