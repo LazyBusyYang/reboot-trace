@@ -29,7 +29,7 @@ const sorted = computed(() => store.hosts
           </div>
           <p v-if="host.error" class="warning" role="alert">{{ host.error }}<br><small>上次成功：{{ fmtTime(host.lastSuccessAt) }}</small></p>
           <p v-else-if="host.warning" class="warning">{{ host.warning }}</p>
-          <p v-if="host.status"><span class="badge">{{ terminationLabel(host.status.lifecycle.termination) }}</span> Boot {{ host.status.boot_id.slice(0, 8) }} · uptime {{ Math.round((host.latest?.system.uptime_seconds || 0) / 60) }} 分钟</p>
+          <p v-if="host.status"><span class="badge">{{ terminationLabel(host.status.lifecycle.termination) }}</span> 容器实例 {{ host.status.lifecycle_key?.slice(0, 8) || '旧版未知' }} · Kernel boot {{ host.status.boot_id.slice(0, 8) }} · uptime {{ Math.round((host.latest?.system.uptime_seconds || 0) / 60) }} 分钟</p>
           <div v-if="host.latest" class="metrics">
             <div class="metric"><span>CPU</span><b>{{ fmtPercent(host.latest.system.host_cpu_percent) }}</b></div>
             <div class="metric"><span>可用内存</span><b>{{ fmtBytes(host.latest.system.memory_available_bytes) }}</b></div>

@@ -217,7 +217,7 @@ footer a {
 <main>
 <section class="decision"><h2>1. 产品原则</h2><div class="grid">
 <div><strong>证据优先</strong><p>默认展示事实、时间和数据完整度，不自动断言重启根因。</p></div>
-<div><strong>生命周期优先</strong><p>所有历史分析都明确所属主机、boot_id 和采样时间。</p></div>
+<div><strong>生命周期优先</strong><p>所有历史分析都明确所属主机、lifecycle_key、容器实例、kernel boot ID 和采样时间。</p></div>
 <div><strong>局部故障隔离</strong><p>一个后端失败不影响其他主机，错误必须落到具体节点。</p></div>
 <div><strong>渐进披露</strong><p>先显示系统摘要，再按需展开用户、进程以及脱敏且可能截断的命令。</p></div>
 </div></section>
@@ -229,6 +229,7 @@ footer a {
 <li>图表推荐 ECharts；表格采用支持虚拟滚动、固定列和键盘操作的组件。</li>
 <li>时间在网络和状态层保持 Unix 毫秒 UTC，只在展示层转换为用户时区。</li>
 <li>前端不得承担权威持久化；Local Storage 只保存筛选条件、主题和列偏好等非敏感信息。</li>
+<li>API v1 客户端兼容 schema 1～3；发布 schema v3 后端前先升级前端，滚动窗口内必须同时正确展示 v2 与 v3 节点。</li>
 </ul></section>
 
 <section><h2>3. 信息架构与路由</h2><table><thead><tr><th>路由</th><th>页面</th><th>核心任务</th></tr></thead><tbody>
@@ -238,18 +239,18 @@ footer a {
 <tr><td><code>.../final</code></td><td>最终证据</td><td>聚焦生命周期末尾快照和证据缺口。</td></tr>
 <tr><td><code>.../compare?left=&amp;right=</code></td><td>快照对比</td><td>识别新增、退出和资源增长最快的进程或用户。</td></tr>
 <tr><td><code>/settings</code></td><td>前端设置</td><td>查看已加载后端、时区、刷新周期和显示偏好。</td></tr>
-</tbody></table><p>路由必须携带 <code>backendId</code>，不能只使用 boot_id，因为不同后端的数据彼此独立。筛选、时间范围、排序和选中快照应尽量同步到 URL，保证刷新和分享后可恢复。</p></section>
+</tbody></table><p>路由必须携带 <code>backendId</code> 与 <code>lifecycle_key</code>；不同后端的数据彼此独立，同一 kernel boot ID 下也可有多个容器生命周期。筛选、时间范围、排序和选中快照应尽量同步到 URL，保证刷新和分享后可恢复。</p></section>
 
 <section><h2>4. 全局应用框架</h2><pre class="flow">┌ 顶栏：产品名 / 全局时间显示 / 刷新状态 / 设置 ┐
 ├ 侧栏：全部主机、在线状态、主机搜索与分组       ┤
-│ ┌ 页面标题 / 主机 / boot_id / 数据完整度 ───┐ │
+│ ┌ 页面标题 / 主机 / 容器实例 / kernel boot / 数据完整度 ┐ │
 │ │ 摘要卡片                                   │ │
 │ │ 趋势、排行、事件或对比主内容               │ │
 │ └────────────────────────────────────────────┘ │
 └ 状态区：后端错误、采样延迟、存储压力提示 ─────┘</pre>
 <ul><li>桌面端侧栏宽 240～280px，可折叠；移动端改为抽屉。</li><li>页面标题下方固定展示面包屑、主机名、生命周期状态和数据时间范围。</li><li>全局刷新按钮必须显示“正在刷新”和“最后完成时间”，避免重复触发并发请求。</li><li>轮询仅更新当前可见页面；标签页隐藏时暂停高频刷新，恢复时立即刷新一次。</li></ul></section>
 
-<section><h2>5. 多主机总览</h2><h3>5.1 主机状态卡</h3><p>每台后端并行请求 <code>/status</code> 和 <code>/latest</code>，显示主机名、连接状态、当前 boot_id 缩写、uptime、最后落盘时间、采样延迟、CPU、可用内存、PSI 和存储使用率。任一请求成功时展示可用部分，不能因另一请求失败清空整张卡。卡片整体可进入主机详情，但卡内按钮必须有独立点击区域。</p>
+<section><h2>5. 多主机总览</h2><h3>5.1 主机状态卡</h3><p>每台后端并行请求 <code>/status</code> 和 <code>/latest</code>，显示主机名、连接状态、当前容器实例缩写、kernel boot ID、uptime、最后落盘时间、采样延迟、CPU、可用内存、PSI 和存储使用率。任一请求成功时展示可用部分，不能因另一请求失败清空整张卡。卡片整体可进入主机详情，但卡内按钮必须有独立点击区域。</p>
 <h3>5.2 排序与筛选</h3><ul><li>默认优先级：不可达 → 采样严重延迟 → 存储压力 → 高 PSI → 正常。</li><li>支持按名称搜索，并按在线状态、生命周期状态和能力筛选。</li><li>主机比较必须标明指标时间，时间差超过两个采样周期时不得用颜色暗示精确横向排名。</li></ul>
 <h3>5.3 并行请求</h3><p>对所有后端执行独立请求，采用 <code>Promise.allSettled</code> 语义。每张卡拥有自己的 skeleton、成功、空数据、超时、未授权和版本不兼容状态。总览顶部汇总“成功 N / 总数 M”，但不以全屏错误覆盖成功节点。</p></section>
 
@@ -284,7 +285,7 @@ footer a {
 
 <section><h2>10. 视觉规范</h2><h3>10.1 色彩语义</h3><table><tr><th>语义</th><th>建议</th><th>用途</th></tr><tr><td>品牌蓝</td><td><code>#315CD6</code></td><td>主操作、选中状态、链接。</td></tr><tr><td>正常绿</td><td><code>#13795B</code></td><td>在线、成功；不表示“无风险”。</td></tr><tr><td>提醒橙</td><td><code>#E59324</code></td><td>采样延迟、空间逼近阈值、部分数据。</td></tr><tr><td>错误红</td><td><code>#C73E4D</code></td><td>请求失败、数据不可用、硬阈值。</td></tr><tr><td>中性灰</td><td><code>#647087</code></td><td>未知、未支持、次要信息。</td></tr></table>
 <p>颜色不能是唯一的信息载体，必须配合文本、图标或形状。资源使用率的颜色阈值由后端或配置提供，前端不得散落硬编码。</p>
-<h3>10.2 排版与间距</h3><ul><li>基础字号 16px，表格最小 13px；数值使用等宽数字特性。</li><li>采用 4px 间距基准；主要卡片内边距 20～24px，卡片间距 16px。</li><li>长 boot_id 默认显示前 8 位并支持复制完整值；命令行单行省略，详情用可换行等宽文本。</li></ul>
+<h3>10.2 排版与间距</h3><ul><li>基础字号 16px，表格最小 13px；数值使用等宽数字特性。</li><li>采用 4px 间距基准；主要卡片内边距 20～24px，卡片间距 16px。</li><li>长 lifecycle_key、实例 UUID 和 kernel boot ID 默认显示前 8 位并支持复制完整值；命令行单行省略，详情用可换行等宽文本。</li></ul>
 <h3>10.3 图表</h3><ul><li>图例、坐标轴和 tooltip 必须带单位，字节采用 IEC 单位（KiB、MiB、GiB）。</li><li>同一指标跨页面保持颜色一致；PSI some/full 使用同色不同明度或线型。</li><li>时间缺口必须断线，禁止用插值连接离线时段。</li><li>大量序列默认只显示 Top N，用户主动选择后才叠加其他进程。</li></ul></section>
 
 <section><h2>11. 响应式与无障碍</h2><ul>
@@ -305,7 +306,7 @@ AsyncState&lt;T&gt; { state: idle|loading|success|error, data?, error?, stale }
 <li>路由切换、筛选变化和组件卸载时使用 AbortController 取消请求。</li>
 <li>后台刷新可以保留旧数据并标记 stale；切换主机时不得闪现上一主机的数据。</li>
 <li>后端返回未知枚举或新增字段时保持前向兼容，并记录可诊断日志。</li>
-<li>状态标签严格映射 API：<code>clean_shutdown_observed</code> 显示“观察到正常关机证据”，<code>unclean_or_unknown</code> 显示“未观察到正常收尾或原因未知”；不得缩写成“异常重启”。</li>
+<li>状态标签严格映射 API：<code>clean_shutdown_observed</code> 显示“观察到正常退出证据”，<code>unclean_or_unknown</code> 显示“未观察到正常收尾或原因未知”；不得缩写成“异常重启”。容器实例与 kernel boot 分栏展示，并显示判定方法和置信度。</li>
 </ul></section>
 
 <section><h2>13. 性能与安全</h2><ul>
@@ -320,7 +321,7 @@ AsyncState&lt;T&gt; { state: idle|loading|success|error, data?, error?, stale }
 <section><h2>14. 组件建议</h2><table><thead><tr><th>组件</th><th>职责</th></tr></thead><tbody>
 <tr><td>BackendStatusBadge</td><td>统一展示在线、超时、未授权和版本不兼容。</td></tr>
 <tr><td>HostSelector</td><td>搜索、分组并选择配置的后端。</td></tr>
-<tr><td>LifecycleHeader</td><td>展示 boot_id、状态、时间和数据完整度。</td></tr>
+<tr><td>LifecycleHeader</td><td>展示 lifecycle_key、容器实例、kernel boot ID、判定方法、置信度、状态、时间和数据完整度。</td></tr>
 <tr><td>MetricCard</td><td>当前值、单位、采样时间、可选趋势和状态说明。</td></tr>
 <tr><td>TimelineChart</td><td>统一缩放、十字游标、事件标记和缺口呈现。</td></tr>
 <tr><td>ProcessRankTable</td><td>多维排行、分页、复制和命令详情。</td></tr>

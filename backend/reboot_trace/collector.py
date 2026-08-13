@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .identity import ContainerIdentity, IdentityReader
 from .models import ProcessSample, SnapshotData
 from .redaction import RedactedCommand, redact_cmdline
 
@@ -42,8 +44,8 @@ class ProcCollector:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.proc = settings.proc_root
-        self.clock_ticks = os.sysconf("SC_CLK_TCK")
-        self.page_size = os.sysconf("SC_PAGE_SIZE")
+        self.clock_ticks = os.sysconf("SC_CLK_TCK") if hasattr(os,"sysconf") else 100
+        self.page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os,"sysconf") else 4096
         self.cpu_count = os.cpu_count() or 1
         self.previous_process: dict[tuple[int, int], tuple[int, int | None, int | None]] = {}
         self.previous_cmdline: dict[tuple[int, int], RedactedCommand] = {}
@@ -53,7 +55,12 @@ class ProcCollector:
         self.previous_oom_kill: int | None = None
         self.usernames = self._load_users()
         self.boot_epoch_ms = self.boot_started_at_ms()
-        self.current_boot_id = self.boot_id()
+        self.identity_reader = IdentityReader(settings)
+        self.current_identity = self.identity_reader.read()
+        self.current_boot_id = self.current_identity.kernel_boot_id
+
+    def identity(self) -> ContainerIdentity:
+        return self.identity_reader.read()
 
     def _load_users(self) -> dict[int, str]:
         result: dict[int, str] = {}
@@ -78,6 +85,10 @@ class ProcCollector:
                 except (ValueError,IndexError): break
         uptime = float(_read(self.proc / "uptime", "0 0").split()[0])
         return int(time.time() * 1000 - uptime * 1000)
+
+    def container_started_at_ms(self, identity: ContainerIdentity | None = None) -> int:
+        value = identity or self.current_identity
+        return self.boot_started_at_ms() + int(value.pid1_start_ticks * 1000 / self.clock_ticks)
 
     def _cpu(self) -> tuple[float | None, tuple[int, int]]:
         fields = _read(self.proc / "stat").splitlines()[0].split()[1:]
@@ -117,7 +128,10 @@ class ProcCollector:
         for mountpoint,fs_type in sorted(mounts.items()):
             target=self.proc/"1/root"/mountpoint.lstrip("/")
             try:
-                fs=os.statvfs(target);result.append({"mountpoint":mountpoint,"fs_type":fs_type,"total_bytes":fs.f_blocks*fs.f_frsize,"available_bytes":fs.f_bavail*fs.f_frsize,"inode_total":fs.f_files,"inode_available":fs.f_favail})
+                if hasattr(os,"statvfs"):
+                    fs=os.statvfs(target);result.append({"mountpoint":mountpoint,"fs_type":fs_type,"total_bytes":fs.f_blocks*fs.f_frsize,"available_bytes":fs.f_bavail*fs.f_frsize,"inode_total":fs.f_files,"inode_available":fs.f_favail})
+                else:
+                    fs=shutil.disk_usage(target);result.append({"mountpoint":mountpoint,"fs_type":fs_type,"total_bytes":fs.total,"available_bytes":fs.free,"inode_total":0,"inode_available":0})
             except OSError:continue
         return result
 
@@ -196,9 +210,9 @@ class ProcCollector:
             return None
 
     def collect(self, scheduled_at_ms: int | None = None) -> SnapshotData:
-        current_boot_id = self.boot_id()
-        if current_boot_id != self.current_boot_id:
-            self.current_boot_id = current_boot_id
+        identity = self.identity()
+        current_boot_id = identity.kernel_boot_id
+        if identity.fingerprint != self.current_identity.fingerprint or identity.container_instance_id != self.current_identity.container_instance_id:
             self.boot_epoch_ms = self.boot_started_at_ms()
             self.previous_process = {}
             self.previous_cmdline = {}
@@ -206,6 +220,8 @@ class ProcCollector:
             self.previous_mono_ns = None
             self.previous_wall_ms = None
             self.previous_oom_kill = None
+        self.current_identity = identity
+        self.current_boot_id = current_boot_id
         started_ns = time.monotonic_ns()
         captured_ms = int(time.time() * 1000)
         interval = (started_ns-self.previous_mono_ns)/1e9 if self.previous_mono_ns else None
@@ -244,4 +260,5 @@ class ProcCollector:
         if system.get("oom_kill_delta"):
             events.append({"type":"oom_observed","details":{"count":system["oom_kill_delta"]}})
         self.previous_process=self._next_process; self.previous_cmdline=self._next_cmdline; self.previous_cpu=cpu_state; self.previous_mono_ns=started_ns; self.previous_wall_ms=captured_ms; self.previous_oom_kill=self._next_oom_kill
-        return SnapshotData(current_boot_id,captured_ms,scheduled_at_ms or captured_ms,duration_ms,int(interval*1000) if interval else None,system,list(selected.values()),list(users.values()),events)
+        system["container_identity"] = identity.as_dict()
+        return SnapshotData(current_boot_id,captured_ms,scheduled_at_ms or captured_ms,duration_ms,int(interval*1000) if interval else None,system,list(selected.values()),list(users.values()),events,lifecycle_key=identity.preferred_key,identity=identity.as_dict())

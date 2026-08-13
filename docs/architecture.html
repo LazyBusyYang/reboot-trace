@@ -212,7 +212,7 @@ footer a {
   a { color: inherit; text-decoration: none; }
 }
 </style></head>
-<body class="page-architecture"><header><h1>项目架构</h1><p>每台主机拥有独立、可离线工作的取证后端；一个 Vue 前端直接聚合多个后端的展示结果。</p></header>
+<body class="page-architecture"><header><h1>项目架构</h1><p>每个目标容器拥有独立、可离线工作的取证后端；一个 Vue 前端直接聚合多个后端的展示结果。</p></header>
 <nav><a href="index.html">首页</a><a href="requirements.html">需求</a><a href="architecture.html">架构</a><a href="database.html">数据库</a><a href="api.html">接口</a><a href="frontend.html">前端</a><a href="deployment.html">部署</a></nav>
 <main>
 <section><h2>1. 总体拓扑</h2><pre class="flow">┌──────────────────── Vue 前端 ────────────────────┐
@@ -227,7 +227,7 @@ footer a {
 └───────────────┘ └───────────────┘ └───────────────┘</pre>
 <p>前端不是持久化中心，也不复制原始数据。每个后端是所属主机数据的权威来源。某台机器离线时，前端标记该节点不可用并继续展示其他节点。</p></section>
 <section><h2>2. 后端组件</h2><table><thead><tr><th>组件</th><th>职责</th></tr></thead><tbody>
-<tr><td>Lifecycle Manager</td><td>读取 boot_id、恢复或建立操作系统生命周期；把采集器启停记录为 service event，不以服务停止终结生命周期。</td></tr>
+<tr><td>Lifecycle Manager</td><td>联合实例 UUID、PID 1 指纹和数据库历史恢复或建立容器生命周期；kernel boot ID 只作辅助证据，采集器启停只记录 service event。</td></tr>
 <tr><td>Collector</td><td>固定调度采样主机和进程，保存上次计数器以计算 CPU/I/O 差值。</td></tr>
 <tr><td>Snapshot Assembler</td><td>合并系统、进程 Top-N、用户汇总和事件，形成完整快照。</td></tr>
 <tr><td>SQLite Repository</td><td>单事务写入、查询、降采样、空间核算和清理。</td></tr>
@@ -243,7 +243,7 @@ footer a {
   "refreshIntervalMs": 5000
 }</code></pre>
 <ul><li><code>id</code> 在前端配置内唯一且稳定，不使用数组位置作为身份。</li><li><code>baseUrl</code> 指向每台主机后端的 HTTPS Ingress；浏览器直接跨域请求，不经过前端代理。</li><li>启动后并行请求各后端 <code>/status</code> 与 <code>/latest</code>，以服务端返回的 <code>host_id</code> 校验配置并取得总览指标。</li><li>请求使用 <code>Promise.allSettled</code> 类型语义，分别呈现成功、超时、Ingress 拒绝和网络失败。</li><li>跨主机时间轴以 UTC 时间戳传输，浏览器使用 status.server_time_ms 与往返时间估算节点时钟偏差，再按用户时区显示。</li><li>第一版后端无应用层登录鉴权，不传 Authorization 和 Cookie；Ingress 负责 TLS，网络策略/私网可达性限制访问范围，后端 CORS 只允许明确配置的前端 Origin。</li></ul></section>
-<section><h2>4. 关键时序</h2><h3>正常采样</h3><ol><li>调度器记录预期触发时间和实际开始时间。</li><li>并行读取主机指标与进程表，并以先前计数器计算速率。</li><li>建立各维度 Top-N 与用户汇总。</li><li>使用一个 SQLite 事务写入 snapshot 及全部子记录。</li><li>提交成功后更新内存“最后持久化快照”；失败则记录错误并保持旧值。</li></ol>
-<h3>服务启动与新生命周期</h3><ol><li>读取当前 boot_id 和稳定 host_id。</li><li>若 boot_id 与数据库活动生命周期相同，恢复该生命周期并记录 <code>collector_started</code> 事件。</li><li>若 boot_id 不同，封存上一生命周期；只有取得可信 OS 关机证据时使用 <code>clean_shutdown_observed</code>，否则使用 <code>unclean_or_unknown</code>。</li><li>为新 boot_id 创建生命周期并立即采样，不覆盖历史行。容器 SIGTERM、升级或采集器崩溃只影响 service event，不改变 boot_id 生命周期身份。</li></ol></section>
-<section class="warning"><h2>5. 故障边界</h2><ul><li>硬断电只能保住最近一次成功提交，无法捕获断电瞬间。</li><li>容器内看到宿主机进程需要正确的 PID namespace 和只读 procfs；部署文档将此作为显式前提。</li><li>无应用层鉴权意味着任何能访问 Ingress 的客户端都能读取脱敏取证数据；Ingress 必须位于受控网络并使用 TLS，CORS 只限制浏览器，不是服务端访问控制。</li><li>50 MiB 是预算而非固定保存时长，保存时长取决于进程数量、采样周期、Top N 与命令长度。</li></ul></section>
+<section><h2>4. 关键时序</h2><h3>正常采样</h3><ol><li>调度器记录预期触发时间和实际开始时间，并复核 PID 1 指纹。</li><li>并行读取系统指标与进程表，并以先前计数器计算速率。</li><li>建立各维度 Top-N 与用户汇总。</li><li>使用一个 SQLite 事务写入 snapshot 及全部子记录。</li><li>提交成功后更新内存“最后持久化快照”；失败则记录错误并保持旧值。</li></ol>
+<h3>服务启动与新生命周期</h3><ol><li>验证后端与目标 PID 1 的 PID/mount namespace 同源，读取根 overlay marker、PID 1 指纹和 kernel boot ID。</li><li>marker 与 PID 1 指纹均未变化时恢复原 lifecycle_key，仅记录 <code>collector_started</code> 或采集空窗。</li><li>marker 与 PID 1 指纹同时变化时以 confirmed 创建新生命周期；仅任一信号变化时以 probable 创建并记录 marker 变化或身份冲突。</li><li>仅 kernel boot ID 变化或仅网络断联不创建新生命周期。未观察到可信正常退出证据时使用 <code>unclean_or_unknown</code>，并保护 final 证据窗口。</li></ol></section>
+<section class="warning"><h2>5. 故障边界</h2><ul><li>硬断电只能保住最近一次成功提交，无法捕获断电瞬间。</li><li>后端必须作为普通进程运行在目标容器内；兄弟容器、host PID 或宿主 procfs 不属于支持的身份拓扑。</li><li>无应用层鉴权意味着任何能访问 Ingress 的客户端都能读取脱敏取证数据；Ingress 必须位于受控网络并使用 TLS。</li><li>50 MiB 是预算而非固定保存时长，保存时长取决于进程数量、采样周期、Top N 与命令长度。</li></ul></section>
 </main><footer><a href="database.html">下一篇：数据库设计 →</a></footer></body></html>

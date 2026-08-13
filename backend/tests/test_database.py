@@ -1,3 +1,4 @@
+import json
 import time
 from dataclasses import replace
 from reboot_trace.database import Repository
@@ -15,6 +16,82 @@ def test_lifecycle_service_restart_does_not_close_boot(settings):
     first=r.start_lifecycle("boot-a",1); r.stop_session(); second=r.start_lifecycle("boot-a",1)
     assert first == second
     assert r.db.execute("select termination from lifecycle where id=?",(first,)).fetchone()[0] == "active"
+    r.close()
+
+
+def test_repository_rejects_data_on_container_root_overlay(settings):
+    import pytest
+    unsafe=replace(settings,data_dir=settings.project_dir/"ephemeral-data")
+    with pytest.raises(RuntimeError,match="container ephemeral root filesystem"):
+        Repository(unsafe,"host","test")
+
+
+def test_repository_rejects_data_and_marker_on_same_mount(settings):
+    import pytest
+    unsafe=replace(settings,instance_marker_path=settings.data_dir/"marker")
+    with pytest.raises(RuntimeError,match="must not use the same mount"):
+        Repository(unsafe,"host","test")
+
+
+def identity(instance: str, ticks: int = 100, kernel_boot: str = "kernel-a") -> dict:
+    return {"container_instance_id":instance,"pid1_start_ticks":ticks,"pid_namespace_inode":42,"cgroup_hash":"abc","fingerprint":f"fp-{ticks}","preferred_key":instance,"kernel_boot_id":kernel_boot}
+
+
+def test_container_instance_change_creates_lifecycle_on_same_kernel_boot(settings):
+    r=Repository(settings,"host","test")
+    first=r.start_lifecycle("kernel-a",1,identity("instance-a",100))
+    second=r.start_lifecycle("kernel-a",2,identity("instance-b",200),start_session=False)
+    assert first != second
+    assert r.db.execute("select count(*) from lifecycle where boot_id='kernel-a'").fetchone()[0] == 2
+    lifecycle=r.db.execute("select detection_method,detection_confidence from lifecycle where id=?",(second,)).fetchone()
+    assert tuple(lifecycle)==("instance_marker_pid1","confirmed")
+    assert r.db.execute("select type from event where lifecycle_id=? order by id desc",(second,)).fetchone()[0] == "container_instance_changed"
+    r.close()
+
+
+def test_marker_change_without_pid1_change_is_probable(settings):
+    r=Repository(settings,"host","test")
+    first=r.start_lifecycle("kernel-a",1,identity("instance-a",100))
+    second=r.start_lifecycle("kernel-a",2,identity("instance-b",100),start_session=False)
+    assert first != second
+    row=r.db.execute("select detection_method,detection_confidence from lifecycle where id=?",(second,)).fetchone()
+    assert tuple(row)==("instance_marker","probable")
+    assert r.db.execute("select type from event where lifecycle_id=? order by id desc",(second,)).fetchone()[0]=="container_instance_changed"
+    r.close()
+
+
+def test_kernel_boot_change_alone_keeps_container_lifecycle(settings):
+    r=Repository(settings,"host","test")
+    first=r.start_lifecycle("kernel-a",1,identity("instance-a"))
+    second=r.start_lifecycle("kernel-b",2,identity("instance-a"),start_session=False)
+    assert first == second
+    assert r.db.execute("select boot_id from lifecycle where id=?",(first,)).fetchone()[0] == "kernel-b"
+    r.close()
+
+
+def test_pid1_change_without_marker_is_probable_restart(settings):
+    r=Repository(settings,"host","test")
+    first_identity=identity("",100);first_identity["container_instance_id"]=None;first_identity["preferred_key"]="pid1-a"
+    second_identity=identity("",200);second_identity["container_instance_id"]=None;second_identity["preferred_key"]="pid1-b"
+    first=r.start_lifecycle("kernel-a",1,first_identity)
+    second=r.start_lifecycle("kernel-a",2,second_identity,start_session=False)
+    assert first != second
+    row=r.db.execute("select detection_method,detection_confidence from lifecycle where id=?",(second,)).fetchone()
+    assert tuple(row)==("pid1_fingerprint","probable")
+    r.close()
+
+
+def test_pid1_change_with_same_marker_is_identity_conflict_and_probable(settings):
+    r=Repository(settings,"host","test")
+    first=r.start_lifecycle("kernel-a",1,identity("instance-a",100))
+    second=r.start_lifecycle("kernel-a",2,identity("instance-a",200),start_session=False)
+    assert first != second
+    row=r.db.execute("select detection_method,detection_confidence from lifecycle where id=?",(second,)).fetchone()
+    assert tuple(row)==("pid1_fingerprint","probable")
+    event=r.db.execute("select type,details_json from event where lifecycle_id=? order by id desc",(second,)).fetchone()
+    assert event["type"]=="identity_conflict"
+    assert json.loads(event["details_json"])["marker_changed"] is False
+    assert json.loads(event["details_json"])["pid1_fingerprint_changed"] is True
     r.close()
 
 
@@ -153,9 +230,94 @@ def test_schema_v1_database_migrates_without_losing_snapshots(settings):
     """)
     db.close()
     r=Repository(settings,"host","2.0")
-    assert r.db.execute("pragma user_version").fetchone()[0] == 2
+    assert r.db.execute("pragma user_version").fetchone()[0] == 3
     assert r.db.execute("select persistence_state from snapshot where id=1").fetchone()[0] == "normal"
+    assert r.db.execute("select lifecycle_key from lifecycle where id=1").fetchone()[0] == "boot-a"
     r.close()
+
+
+def test_schema_v2_database_migrates_legacy_boot_to_lifecycle_key(settings):
+    import sqlite3
+    path=settings.data_dir/"reboot-trace.sqlite3"
+    db=sqlite3.connect(path)
+    db.executescript("""
+      CREATE TABLE host(id TEXT PRIMARY KEY,hostname TEXT NOT NULL,created_at_ms INTEGER NOT NULL);
+      CREATE TABLE lifecycle(id INTEGER PRIMARY KEY,host_id TEXT NOT NULL,boot_id TEXT NOT NULL,started_at_ms INTEGER NOT NULL,last_seen_at_ms INTEGER NOT NULL,ended_at_ms INTEGER,termination TEXT NOT NULL,summary_json TEXT NOT NULL DEFAULT '{}',UNIQUE(host_id,boot_id));
+      CREATE TABLE snapshot(id INTEGER PRIMARY KEY,lifecycle_id INTEGER NOT NULL,captured_at_ms INTEGER NOT NULL,scheduled_at_ms INTEGER NOT NULL,duration_ms INTEGER NOT NULL,sample_interval_ms INTEGER,detail_level TEXT NOT NULL,persistence_state TEXT NOT NULL DEFAULT 'normal');
+      CREATE TABLE system_sample(snapshot_id INTEGER PRIMARY KEY,data_json TEXT NOT NULL);
+      INSERT INTO host VALUES('host-test','host',1);
+      INSERT INTO lifecycle VALUES(1,'host-test','legacy-boot',1,2,NULL,'active','{}');
+      INSERT INTO snapshot VALUES(7,1,2,2,1,NULL,'full','normal');
+      INSERT INTO system_sample VALUES(7,'{"process_count":0,"thread_count":0,"uptime_seconds":1}');
+      PRAGMA user_version=2;
+    """);db.close()
+    repo=Repository(settings,"host","3.0")
+    lifecycle=repo.db.execute("select lifecycle_key,boot_id,detection_method from lifecycle where id=1").fetchone()
+    assert tuple(lifecycle)==("legacy-boot","legacy-boot","legacy")
+    assert repo.db.execute("select count(*) from snapshot where lifecycle_id=1").fetchone()[0]==1
+    assert repo.db.execute("pragma foreign_key_check").fetchall()==[]
+    repo.close()
+
+
+def test_schema_v3_migration_failure_rolls_back_all_table_changes(settings,monkeypatch):
+    import sqlite3
+    import pytest
+    path=settings.data_dir/"reboot-trace.sqlite3"
+    db=sqlite3.connect(path)
+    db.executescript("""
+      CREATE TABLE host(id TEXT PRIMARY KEY,hostname TEXT NOT NULL,created_at_ms INTEGER NOT NULL);
+      CREATE TABLE lifecycle(id INTEGER PRIMARY KEY,host_id TEXT NOT NULL,boot_id TEXT NOT NULL,started_at_ms INTEGER NOT NULL,last_seen_at_ms INTEGER NOT NULL,ended_at_ms INTEGER,termination TEXT NOT NULL,summary_json TEXT NOT NULL DEFAULT '{}');
+      CREATE TABLE snapshot(id INTEGER PRIMARY KEY,lifecycle_id INTEGER NOT NULL,captured_at_ms INTEGER NOT NULL,scheduled_at_ms INTEGER NOT NULL,duration_ms INTEGER NOT NULL,sample_interval_ms INTEGER,detail_level TEXT NOT NULL);
+      CREATE TABLE event(id INTEGER PRIMARY KEY,lifecycle_id INTEGER NOT NULL,snapshot_id INTEGER,occurred_at_ms INTEGER NOT NULL,type TEXT NOT NULL CHECK(type IN ('collector_started')),details_json TEXT NOT NULL);
+      INSERT INTO host VALUES('host-test','host',1);
+      INSERT INTO lifecycle VALUES(1,'host-test','legacy-boot',1,2,NULL,'active','{}');
+      INSERT INTO snapshot VALUES(7,1,2,2,1,NULL,'full');
+      INSERT INTO event VALUES(9,1,NULL,2,'collector_started','{}');
+      PRAGMA user_version=1;
+    """);db.close()
+    original=Repository._migration_checkpoint
+    def fail_after_lifecycle(self,stage):
+        if stage=="after_lifecycle":raise RuntimeError("injected migration failure")
+    monkeypatch.setattr(Repository,"_migration_checkpoint",fail_after_lifecycle)
+    with pytest.raises(RuntimeError,match="injected migration failure"):
+        Repository(settings,"host","3.0")
+    check=sqlite3.connect(path)
+    assert "lifecycle_key" not in {row[1] for row in check.execute("pragma table_info(lifecycle)")}
+    assert "persistence_state" not in {row[1] for row in check.execute("pragma table_info(snapshot)")}
+    assert check.execute("pragma user_version").fetchone()[0]==1
+    assert check.execute("select count(*) from event").fetchone()[0]==1
+    check.close()
+    monkeypatch.setattr(Repository,"_migration_checkpoint",original)
+    recovered=Repository(settings,"host","3.0")
+    assert recovered.db.execute("pragma user_version").fetchone()[0]==3
+    assert recovered.db.execute("select count(*) from event").fetchone()[0]==1
+    recovered.close()
+
+
+def test_schema_v3_repairs_mixed_lifecycle_and_legacy_event_schema(settings):
+    import sqlite3
+    path=settings.data_dir/"reboot-trace.sqlite3"
+    db=sqlite3.connect(path)
+    db.executescript("""
+      CREATE TABLE host(id TEXT PRIMARY KEY,hostname TEXT NOT NULL,created_at_ms INTEGER NOT NULL);
+      CREATE TABLE lifecycle(
+        id INTEGER PRIMARY KEY,host_id TEXT NOT NULL,lifecycle_key TEXT NOT NULL,boot_id TEXT NOT NULL,container_instance_id TEXT,
+        pid1_start_ticks INTEGER,pid_namespace_inode INTEGER,cgroup_hash TEXT,detection_method TEXT NOT NULL DEFAULT 'legacy',
+        detection_confidence TEXT NOT NULL DEFAULT 'unknown',identity_first_observed_at_ms INTEGER,started_at_ms INTEGER NOT NULL,
+        last_seen_at_ms INTEGER NOT NULL,ended_at_ms INTEGER,termination TEXT NOT NULL,summary_json TEXT NOT NULL DEFAULT '{}',UNIQUE(host_id,lifecycle_key));
+      CREATE TABLE event(id INTEGER PRIMARY KEY,lifecycle_id INTEGER NOT NULL,snapshot_id INTEGER,occurred_at_ms INTEGER NOT NULL,type TEXT NOT NULL CHECK(type IN ('collector_started')),details_json TEXT NOT NULL);
+      INSERT INTO host VALUES('host-test','host',1);
+      INSERT INTO lifecycle VALUES(1,'host-test','instance-a','kernel-a',NULL,NULL,NULL,NULL,'legacy','unknown',NULL,1,2,NULL,'active','{}');
+      INSERT INTO event VALUES(1,1,NULL,2,'collector_started','{}');
+      PRAGMA user_version=2;
+    """);db.close()
+    repo=Repository(settings,"host","3.0")
+    event_sql=repo.db.execute("select sql from sqlite_master where name='event'").fetchone()[0]
+    assert "container_instance_changed" in event_sql
+    repo.db.execute("insert into event(lifecycle_id,occurred_at_ms,type,details_json) values(1,3,'container_instance_changed','{}')")
+    repo.db.commit()
+    assert repo.db.execute("pragma foreign_key_check").fetchall()==[]
+    repo.close()
 
 
 def test_schema_migration_refuses_insufficient_managed_budget(settings):

@@ -29,4 +29,22 @@ describe('API client',()=>{
     vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({api_version:'1',schema_version:99})}));vi.stubGlobal('crypto',{randomUUID:()=> 'request-id'})
     await expect(api({id:'a',name:'A',baseUrl:'https://host.example/api/v1'},'/status')).rejects.toMatchObject({kind:'incompatible',code:'VERSION_UNSUPPORTED'})
   })
+  it('accepts schema v3 lifecycle identity responses',async()=>{
+    const payload={api_version:'1',schema_version:3,lifecycle_key:'instance-a',boot_id:'kernel-a'}
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>payload}));vi.stubGlobal('crypto',{randomUUID:()=> 'request-id'})
+    await expect(api({id:'a',name:'A',baseUrl:'https://host.example/api/v1'},'/status')).resolves.toMatchObject(payload)
+  })
+  it('accepts schema v2 and v3 backends during a rolling upgrade',async()=>{
+    const v2={api_version:'1',schema_version:2,boot_id:'kernel-a'}
+    const v3={api_version:'1',schema_version:3,lifecycle_key:'instance-b',boot_id:'kernel-b'}
+    vi.stubGlobal('fetch',vi.fn()
+      .mockResolvedValueOnce({ok:true,json:async()=>v2})
+      .mockResolvedValueOnce({ok:true,json:async()=>v3}))
+    vi.stubGlobal('crypto',{randomUUID:()=> 'request-id'})
+    const values=await Promise.all([
+      api<{schema_version:number}>({id:'a',name:'A',baseUrl:'https://a.example/api/v1'},'/status'),
+      api<{schema_version:number}>({id:'b',name:'B',baseUrl:'https://b.example/api/v1'},'/status'),
+    ])
+    expect(values.map(value=>value.schema_version)).toEqual([2,3])
+  })
 })

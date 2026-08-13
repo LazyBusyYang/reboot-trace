@@ -1,6 +1,6 @@
 # Reboot Trace
 
-面向 Linux 跳板机异常重启调查的轻量取证系统。后端持续采集宿主机资源、各维度 Top-N 进程与用户汇总，并在有限 SQLite 空间内跨 boot 生命周期保存；Vue 前端通过 HTTPS Ingress 跨域聚合多个后端。
+面向 Linux 容器异常重启调查的轻量取证系统。后端持续采集目标环境资源、各维度 Top-N 进程与用户汇总，并在有限 SQLite 空间内跨容器实例生命周期保存；Vue 前端通过 HTTPS Ingress 跨域聚合多个后端。
 
 ## 后端开发
 
@@ -8,10 +8,10 @@
 python3 -m venv .venv
 .venv/bin/pip install -r backend/requirements-test.lock
 PYTHONPATH=backend .venv/bin/pytest
-RT_DATA_DIR=/tmp/reboot-trace RT_PROC_ROOT=/proc RT_HOST_PASSWD=/etc/passwd RT_CORS_ORIGINS=http://localhost:5173 PYTHONPATH=backend .venv/bin/uvicorn reboot_trace.main:app --reload
+RT_PROJECT_DIR="$PWD" RT_PROC_ROOT=/proc RT_HOST_PASSWD=/etc/passwd RT_CORS_ORIGINS=http://localhost:5173 PYTHONPATH=backend .venv/bin/uvicorn reboot_trace.main:app --reload
 ```
 
-容器部署必须提供宿主机 PID namespace，并只读挂载 `/proc` 和可选 `/etc/passwd`，详见 `docs/deployment.html`。
+后端必须作为普通进程直接运行在目标容器内，使用本地 `/proc` 和目标容器根 overlay 中的实例 marker。标准部署默认使用 `/run/reboot-trace/container-instance-id`；无法由 root 准备目录的 dev1/4/5/9 使用 `scripts/instances/`，由普通用户在 `/tmp/reboot-trace-${UID}` 创建私有 marker。数据默认建议放在 `<项目根>/var/reboot-trace`；Git 项目目录本身不要求持久，但运维人员必须在启动前确认这个实际数据路径位于适合 SQLite 且能跨目标容器重建保留的挂载，否则应显式设置 `RT_DATA_DIR`。程序会拒绝明显位于根 overlay 或与 marker 同挂载的配置，但不会代替真实重建验收。
 
 ## 前端开发
 
@@ -22,6 +22,7 @@ npm run dev
 ```
 
 编辑 `frontend/public/config/runtime-config.json`，将 `baseUrl` 配置为各后端 HTTPS Ingress 的 `/api/v1` 地址。浏览器请求不携带 Cookie 或 Authorization。
+当前前端兼容 schema 1–3；升级后端到 schema v3 前应先发布新前端，并继续挂载现有生产 `runtime-config.json`，不要把 Ingress 地址写入镜像。
 
 ## 验收
 

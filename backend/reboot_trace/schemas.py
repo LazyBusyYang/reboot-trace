@@ -10,6 +10,8 @@ class ContractModel(BaseModel):
 
 class StorageStatus(ContractModel):
     used_bytes:int;limit_bytes:int;persistence_state:str
+    data_path:str|None=None;mountpoint:str|None=None;fs_type:str|None=None
+    persistence_capability:str|None=None;persistence_reason:str|None=None
 
 
 class LifecycleStatus(ContractModel):
@@ -32,10 +34,11 @@ class ApiResponse(ContractModel):
 
 
 class StatusResponse(ApiResponse):
-    hostname:str;boot_id:str;server_time_ms:int;backend_version:str
+    hostname:str;boot_id:str;lifecycle_key:str;server_time_ms:int;backend_version:str
     lifecycle:LifecycleStatus;last_persisted_at_ms:int|None
     storage:StorageStatus;collector:CollectorStatus
     capabilities:dict[str,Capability]
+    identity:dict[str,Any]={}
 
 
 class FilesystemSample(ContractModel):
@@ -67,7 +70,7 @@ class LatestCollector(ContractModel):
 
 
 class LatestResponse(ApiResponse):
-    boot_id:str;snapshot_id:int;captured_at_ms:int;detail_level:str
+    boot_id:str;lifecycle_key:str;snapshot_id:int;captured_at_ms:int;detail_level:str
     system:SystemSample;collector:LatestCollector;storage:StorageStatus
 
 
@@ -76,9 +79,12 @@ class PublicConfigResponse(ApiResponse):
 
 
 class LifecycleSummary(ContractModel):
-    id:int;host_id:str;boot_id:str;started_at_ms:int;last_seen_at_ms:int
+    id:int;host_id:str;boot_id:str;lifecycle_key:str;started_at_ms:int;last_seen_at_ms:int
     ended_at_ms:int|None=None;termination:str;summary_json:str
     snapshot_count:int=0;retention_state:str="complete"
+    container_instance_id:str|None=None;pid1_start_ticks:int|None=None;pid_namespace_inode:int|None=None
+    cgroup_hash:str|None=None;detection_method:str="legacy";detection_confidence:str="unknown"
+    identity_first_observed_at_ms:int|None=None
 
 
 class LifecycleResponse(ApiResponse,LifecycleSummary):
@@ -90,7 +96,7 @@ class LifecyclePage(ApiResponse):
 
 
 class SnapshotSummary(ContractModel):
-    id:int;boot_id:str;captured_at_ms:int;scheduled_at_ms:int
+    id:int;boot_id:str;lifecycle_key:str|None=None;captured_at_ms:int;scheduled_at_ms:int
     duration_ms:int;sample_interval_ms:int|None=None;detail_level:str
     persistence_state:str="normal"
 
@@ -126,11 +132,11 @@ class FinalSnapshot(SnapshotSummary):
 
 
 class FinalResponse(ApiResponse):
-    boot_id:str;termination:str;last_persisted_at_ms:int;evidence_gap_ms:int|None=None;snapshots:list[FinalSnapshot]
+    boot_id:str;lifecycle_key:str|None=None;termination:str;last_persisted_at_ms:int;evidence_gap_ms:int|None=None;snapshots:list[FinalSnapshot]
 
 
 class EventResponse(ContractModel):
-    id:int;boot_id:str;snapshot_id:int|None=None;occurred_at_ms:int;type:str;details:dict[str,Any]
+    id:int;boot_id:str;lifecycle_key:str|None=None;snapshot_id:int|None=None;occurred_at_ms:int;type:str;details:dict[str,Any]
 
 
 class EventPage(ApiResponse):

@@ -12,15 +12,19 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .identity import MountIdentity, _mount_identity
 from .models import SnapshotData
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS host(id TEXT PRIMARY KEY, hostname TEXT NOT NULL, created_at_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS lifecycle(
  id INTEGER PRIMARY KEY, host_id TEXT NOT NULL REFERENCES host(id) ON DELETE CASCADE,
- boot_id TEXT NOT NULL, started_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL,
+ lifecycle_key TEXT NOT NULL, boot_id TEXT NOT NULL, container_instance_id TEXT,
+ pid1_start_ticks INTEGER, pid_namespace_inode INTEGER, cgroup_hash TEXT,
+ detection_method TEXT NOT NULL DEFAULT 'legacy', detection_confidence TEXT NOT NULL DEFAULT 'unknown',
+ identity_first_observed_at_ms INTEGER, started_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL,
  ended_at_ms INTEGER, termination TEXT NOT NULL CHECK(termination IN ('active','clean_shutdown_observed','unclean_or_unknown')),
- summary_json TEXT NOT NULL DEFAULT '{}', UNIQUE(host_id,boot_id));
+ summary_json TEXT NOT NULL DEFAULT '{}', UNIQUE(host_id,lifecycle_key));
 CREATE TABLE IF NOT EXISTS service_session(
  id INTEGER PRIMARY KEY, lifecycle_id INTEGER NOT NULL REFERENCES lifecycle(id) ON DELETE CASCADE,
  started_at_ms INTEGER NOT NULL, stopped_at_ms INTEGER, backend_version TEXT NOT NULL);
@@ -45,7 +49,7 @@ CREATE TABLE IF NOT EXISTS user_sample(snapshot_id INTEGER NOT NULL REFERENCES s
 CREATE TABLE IF NOT EXISTS event(
  id INTEGER PRIMARY KEY, lifecycle_id INTEGER NOT NULL REFERENCES lifecycle(id) ON DELETE CASCADE,
  snapshot_id INTEGER REFERENCES snapshot(id) ON DELETE SET NULL, occurred_at_ms INTEGER NOT NULL,
- type TEXT NOT NULL CHECK(type IN ('oom_observed','sampling_delay','collector_error','retention','collector_started','collector_stopped','host_shutdown_observed')),
+ type TEXT NOT NULL CHECK(type IN ('oom_observed','sampling_delay','collector_error','retention','collector_started','collector_stopped','host_shutdown_observed','container_instance_changed','identity_conflict','identity_baseline_established','collection_gap')),
  details_json TEXT NOT NULL CHECK(length(CAST(details_json AS BLOB))<=4096));
 CREATE INDEX IF NOT EXISTS idx_snapshot_time ON snapshot(lifecycle_id,captured_at_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_rank ON process_rank(snapshot_id,dimension,rank);
@@ -53,7 +57,9 @@ CREATE INDEX IF NOT EXISTS idx_event_time ON event(lifecycle_id,occurred_at_ms D
 CREATE INDEX IF NOT EXISTS idx_session_time ON service_session(lifecycle_id,started_at_ms DESC);
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+FINAL_WINDOW_MS = 10 * 60 * 1000
+MIN_FINAL_SNAPSHOTS = 12
 
 
 def _details_json(details: dict[str, Any] | None) -> str:
@@ -63,9 +69,34 @@ def _details_json(details: dict[str, Any] | None) -> str:
     return '{"truncated":true}'
 
 
+def _same_mount(left: MountIdentity, right: MountIdentity) -> bool:
+    return (left.mountpoint, left.fs_type, left.source) == (right.mountpoint, right.fs_type, right.source)
+
+
+def _storage_capability(settings: Settings) -> dict[str, Any]:
+    if not settings.data_dir.is_absolute():
+        raise RuntimeError("RT_DATA_DIR must resolve to an absolute path")
+    data_mount = _mount_identity(settings.proc_root, settings.data_dir)
+    marker_mount = _mount_identity(settings.proc_root, settings.instance_marker_path)
+    if data_mount is None:
+        raise RuntimeError("cannot locate RT_DATA_DIR in PID 1 mountinfo")
+    if data_mount.mountpoint == "/" and data_mount.fs_type in {"overlay", "fuse-overlayfs"}:
+        raise RuntimeError("RT_DATA_DIR is on the container ephemeral root filesystem; choose an operator-verified persistent mount")
+    if marker_mount is not None and _same_mount(data_mount, marker_mount):
+        raise RuntimeError("RT_DATA_DIR and RT_INSTANCE_MARKER_PATH must not use the same mount")
+    return {
+        "data_path": str(settings.data_dir),
+        "mountpoint": data_mount.mountpoint,
+        "fs_type": data_mount.fs_type,
+        "persistence_capability": "operator_verification_required",
+        "persistence_reason": "separate mount observed; verify retention across a real target-container rebuild",
+    }
+
+
 class Repository:
     def __init__(self, settings: Settings, hostname: str, backend_version: str):
         self.settings = settings
+        self.storage_capability = _storage_capability(settings)
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.path = settings.data_dir / "reboot-trace.sqlite3"
         new = not self.path.exists()
@@ -84,17 +115,32 @@ class Repository:
         version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
         if version > SCHEMA_VERSION:
             raise RuntimeError(f"database schema {version} is newer than supported {SCHEMA_VERSION}")
-        self.db.executescript(SCHEMA)
-        snapshot_columns = {row[1] for row in self.db.execute("PRAGMA table_info(snapshot)")}
-        if "persistence_state" not in snapshot_columns:
+        existing_tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        snapshot_columns = {row[1] for row in self.db.execute("PRAGMA table_info(snapshot)")} if "snapshot" in existing_tables else set()
+        lifecycle_columns = {row[1] for row in self.db.execute("PRAGMA table_info(lifecycle)")} if "lifecycle" in existing_tables else set()
+        event_sql_row = self.db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='event'").fetchone()
+        event_is_v3 = not event_sql_row or "container_instance_changed" in (event_sql_row[0] or "")
+        snapshot_needs_v2 = bool(snapshot_columns) and "persistence_state" not in snapshot_columns
+        lifecycle_needs_v3 = bool(lifecycle_columns) and "lifecycle_key" not in lifecycle_columns
+        event_needs_v3 = "event" in existing_tables and not event_is_v3
+        needs_migration = bool(existing_tables) and (version < SCHEMA_VERSION or snapshot_needs_v2 or lifecycle_needs_v3 or event_needs_v3)
+        if needs_migration:
             migration_reserve = 2 * 1024 * 1024
             managed = sum(p.stat().st_size for p in settings.data_dir.iterdir() if p.is_file())
             free = shutil.disk_usage(settings.data_dir).free
             if managed + migration_reserve > settings.storage_limit_bytes or free < migration_reserve:
                 self.db.close()
                 raise RuntimeError("insufficient space to migrate database schema")
-            self.db.execute("ALTER TABLE snapshot ADD COLUMN persistence_state TEXT NOT NULL DEFAULT 'normal'")
-        self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        if needs_migration:
+            self._migrate_schema_v3(snapshot_needs_v2,lifecycle_needs_v3,event_needs_v3)
+        else:
+            self.db.executescript(SCHEMA)
+            self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            self.db.commit()
+        violations=self.db.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            self.db.close()
+            raise RuntimeError("database foreign key check failed after schema initialization")
         self.host_id = settings.host_id_override or self._load_or_create_host_id()
         now = int(time.time() * 1000)
         self.db.execute("INSERT OR IGNORE INTO host VALUES(?,?,?)", (self.host_id, hostname, now))
@@ -107,6 +153,55 @@ class Repository:
         self.persistence_state = "paused" if self.managed_bytes() >= settings.storage_limit_bytes - 2 * 1024 * 1024 else "normal"
         self.max_transaction_bytes = 0
         self.reclaim_requested = False
+
+    def _migration_checkpoint(self, stage: str) -> None:
+        """Test hook for proving that schema replacement is failure atomic."""
+
+    def _migrate_schema_v3(self, snapshot_needs_v2: bool, lifecycle_needs_v3: bool, event_needs_v3: bool) -> None:
+        self.db.commit()
+        self.db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            if snapshot_needs_v2:
+                self.db.execute("ALTER TABLE snapshot ADD COLUMN persistence_state TEXT NOT NULL DEFAULT 'normal'")
+            if lifecycle_needs_v3:
+                self.db.execute("""CREATE TABLE lifecycle_v3(
+                  id INTEGER PRIMARY KEY, host_id TEXT NOT NULL REFERENCES host(id) ON DELETE CASCADE,
+                  lifecycle_key TEXT NOT NULL, boot_id TEXT NOT NULL, container_instance_id TEXT,
+                  pid1_start_ticks INTEGER, pid_namespace_inode INTEGER, cgroup_hash TEXT,
+                  detection_method TEXT NOT NULL DEFAULT 'legacy', detection_confidence TEXT NOT NULL DEFAULT 'unknown',
+                  identity_first_observed_at_ms INTEGER, started_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL,
+                  ended_at_ms INTEGER, termination TEXT NOT NULL CHECK(termination IN ('active','clean_shutdown_observed','unclean_or_unknown')),
+                  summary_json TEXT NOT NULL DEFAULT '{}', UNIQUE(host_id,lifecycle_key))""")
+                self.db.execute("""INSERT INTO lifecycle_v3(id,host_id,lifecycle_key,boot_id,started_at_ms,last_seen_at_ms,ended_at_ms,termination,summary_json)
+                  SELECT id,host_id,boot_id,boot_id,started_at_ms,last_seen_at_ms,ended_at_ms,termination,summary_json FROM lifecycle""")
+                self.db.execute("DROP TABLE lifecycle")
+                self.db.execute("ALTER TABLE lifecycle_v3 RENAME TO lifecycle")
+            self._migration_checkpoint("after_lifecycle")
+            if event_needs_v3:
+                self.db.execute("""CREATE TABLE event_v3(
+                  id INTEGER PRIMARY KEY, lifecycle_id INTEGER NOT NULL REFERENCES lifecycle(id) ON DELETE CASCADE,
+                  snapshot_id INTEGER REFERENCES snapshot(id) ON DELETE SET NULL, occurred_at_ms INTEGER NOT NULL,
+                  type TEXT NOT NULL CHECK(type IN ('oom_observed','sampling_delay','collector_error','retention','collector_started','collector_stopped','host_shutdown_observed','container_instance_changed','identity_conflict','identity_baseline_established','collection_gap')),
+                  details_json TEXT NOT NULL CHECK(length(CAST(details_json AS BLOB))<=4096))""")
+                self.db.execute("INSERT INTO event_v3 SELECT * FROM event")
+                self.db.execute("DROP TABLE event")
+                self.db.execute("ALTER TABLE event_v3 RENAME TO event")
+            self._migration_checkpoint("after_event")
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    self.db.execute(statement)
+            violations=self.db.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError("database foreign key check failed during migration")
+            self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            self.db.commit()
+        except Exception:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
+        finally:
+            self.db.execute("PRAGMA foreign_keys=ON")
 
     def _load_or_create_host_id(self) -> str:
         path = self.settings.data_dir / "host-id"
@@ -127,9 +222,13 @@ class Repository:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
-        directory_fd = os.open(self.settings.data_dir, os.O_RDONLY)
-        try: os.fsync(directory_fd)
-        finally: os.close(directory_fd)
+        try:
+            directory_fd = os.open(self.settings.data_dir, os.O_RDONLY)
+        except (OSError, PermissionError):
+            directory_fd = None
+        if directory_fd is not None:
+            try: os.fsync(directory_fd)
+            finally: os.close(directory_fd)
         return value
 
     def managed_bytes(self) -> int:
@@ -172,31 +271,113 @@ class Repository:
             return "system_only", 0
         return None
 
-    def start_lifecycle(self, boot_id: str, started_at_ms: int) -> int:
+    @staticmethod
+    def _fingerprint_changed(row: sqlite3.Row, identity: dict[str, Any]) -> bool:
+        values = (identity.get("pid1_start_ticks"), identity.get("pid_namespace_inode"), identity.get("cgroup_hash"))
+        stored = (row["pid1_start_ticks"], row["pid_namespace_inode"], row["cgroup_hash"])
+        return all(value is not None for value in values) and all(value is not None for value in stored) and values != stored
+
+    def _finalize_lifecycle(self, lifecycle_id: int) -> None:
+        row = self.db.execute("SELECT last_seen_at_ms FROM lifecycle WHERE id=?", (lifecycle_id,)).fetchone()
+        if not row:
+            return
+        cutoff = int(row["last_seen_at_ms"]) - FINAL_WINDOW_MS
+        self.db.execute("""
+            UPDATE snapshot SET detail_level='final'
+            WHERE lifecycle_id=? AND persistence_state='normal' AND detail_level='full' AND captured_at_ms>=?
+        """, (lifecycle_id, cutoff))
+        self.db.execute("""
+            UPDATE snapshot SET detail_level='final'
+            WHERE id IN (
+              SELECT id FROM snapshot WHERE lifecycle_id=? AND persistence_state='normal' AND detail_level='full'
+              ORDER BY captured_at_ms DESC LIMIT ?
+            )
+        """, (lifecycle_id, MIN_FINAL_SNAPSHOTS))
+        count = self.db.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=? AND detail_level='final' AND persistence_state='normal'", (lifecycle_id,)).fetchone()[0]
+        retention_state = "final_complete" if count >= MIN_FINAL_SNAPSHOTS else "final_partial"
+        self.db.execute("UPDATE lifecycle SET termination='unclean_or_unknown',ended_at_ms=last_seen_at_ms,summary_json=? WHERE id=?", (json.dumps({"retention_state":retention_state}, separators=(",", ":")), lifecycle_id))
+
+    def start_lifecycle(self, boot_id: str, started_at_ms: int, identity: dict[str, Any] | None = None, *, start_session: bool = True, collector_started_event: bool = True) -> int:
         now = int(time.time() * 1000)
+        identity = identity or {}
+        preferred_key = str(identity.get("container_instance_id") or identity.get("preferred_key") or boot_id)
+        method = "instance_marker" if identity.get("container_instance_id") else ("pid1_fingerprint" if identity else "legacy_boot_id")
+        confidence = "confirmed" if identity.get("container_instance_id") else ("probable" if identity else "legacy")
         with self.lock, self.db:
             active = self.db.execute("SELECT * FROM lifecycle WHERE host_id=? AND termination='active' ORDER BY id DESC LIMIT 1", (self.host_id,)).fetchone()
-            if active and active["boot_id"] != boot_id:
+            baseline = bool(active and identity and active["pid1_start_ticks"] is None)
+            marker_changed = bool(active and identity and active["container_instance_id"] and identity.get("container_instance_id") and active["container_instance_id"] != identity.get("container_instance_id"))
+            fingerprint_changed = bool(active and identity and self._fingerprint_changed(active, identity))
+            legacy_changed = bool(active and not identity and active["boot_id"] != boot_id)
+            changed = marker_changed or fingerprint_changed or legacy_changed
+            # Confidence describes the signals that actually caused the lifecycle
+            # transition. A locally managed marker is confirmed only when the PID 1
+            # fingerprint independently changes with it; either signal alone is
+            # probable because a marker may be deleted or a PID identity may conflict.
+            if active and marker_changed and fingerprint_changed:
+                method = "instance_marker_pid1"
+                confidence = "confirmed"
+            elif active and marker_changed:
+                method = "instance_marker"
+                confidence = "probable"
+            elif active and fingerprint_changed:
+                method = "pid1_fingerprint"
+                confidence = "probable"
+            if baseline:
                 self.db.execute("""
-                    UPDATE snapshot SET detail_level='final'
-                    WHERE id=(SELECT id FROM snapshot WHERE lifecycle_id=? AND detail_level='full' AND persistence_state='normal' ORDER BY captured_at_ms DESC LIMIT 1)
-                """, (active["id"],))
-                self.db.execute("UPDATE lifecycle SET termination='unclean_or_unknown',ended_at_ms=last_seen_at_ms WHERE id=?", (active["id"],))
-            row = self.db.execute("SELECT id FROM lifecycle WHERE host_id=? AND boot_id=?", (self.host_id, boot_id)).fetchone()
-            if row:
-                lifecycle_id = row["id"]
-                self.db.execute("UPDATE lifecycle SET termination='active',ended_at_ms=NULL WHERE id=?", (lifecycle_id,))
+                    UPDATE lifecycle SET boot_id=?,container_instance_id=?,pid1_start_ticks=?,pid_namespace_inode=?,cgroup_hash=?,
+                      detection_method='upgrade_baseline',detection_confidence='unknown',identity_first_observed_at_ms=? WHERE id=?
+                """, (boot_id,identity.get("container_instance_id"),identity.get("pid1_start_ticks"),identity.get("pid_namespace_inode"),identity.get("cgroup_hash"),now,active["id"]))
+                self.db.execute("INSERT INTO event(lifecycle_id,occurred_at_ms,type,details_json) VALUES(?,?,?,?)", (active["id"],now,"identity_baseline_established",'{"pre_upgrade_gap_unknown":true}'))
+                lifecycle_id = active["id"]
+            elif active and not changed:
+                lifecycle_id = active["id"]
+                if identity:
+                    self.db.execute("UPDATE lifecycle SET boot_id=? WHERE id=?", (boot_id, lifecycle_id))
             else:
-                cur = self.db.execute("INSERT INTO lifecycle(host_id,boot_id,started_at_ms,last_seen_at_ms,termination) VALUES(?,?,?,?,?)", (self.host_id, boot_id, started_at_ms, now, "active"))
+                if active:
+                    self._finalize_lifecycle(active["id"])
+                    if self.session_id:
+                        self.db.execute("UPDATE service_session SET stopped_at_ms=? WHERE id=? AND stopped_at_ms IS NULL", (now, self.session_id))
+                        self.session_id = None
+                lifecycle_key = preferred_key
+                if self.db.execute("SELECT 1 FROM lifecycle WHERE host_id=? AND lifecycle_key=?", (self.host_id,lifecycle_key)).fetchone():
+                    suffix = str(identity.get("fingerprint") or uuid.uuid4().hex)[:12]
+                    lifecycle_key = f"{preferred_key}:{suffix}:{now}"
+                cur = self.db.execute("""
+                    INSERT INTO lifecycle(host_id,lifecycle_key,boot_id,container_instance_id,pid1_start_ticks,pid_namespace_inode,cgroup_hash,
+                      detection_method,detection_confidence,identity_first_observed_at_ms,started_at_ms,last_seen_at_ms,termination)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (self.host_id,lifecycle_key,boot_id,identity.get("container_instance_id"),identity.get("pid1_start_ticks"),identity.get("pid_namespace_inode"),identity.get("cgroup_hash"),method,confidence,now,started_at_ms,now,"active"))
                 lifecycle_id = cur.lastrowid
-            cur = self.db.execute("INSERT INTO service_session(lifecycle_id,started_at_ms,backend_version) VALUES(?,?,?)", (lifecycle_id, now, self.backend_version))
-            self.session_id = cur.lastrowid
-            self.db.execute("INSERT INTO event(lifecycle_id,occurred_at_ms,type,details_json) VALUES(?,?,?,?)", (lifecycle_id, now, "collector_started", "{}"))
+                if active and identity:
+                    event_type = "container_instance_changed" if marker_changed else "identity_conflict"
+                    details = {"previous_lifecycle_key":active["lifecycle_key"],"marker_changed":marker_changed,"pid1_fingerprint_changed":fingerprint_changed}
+                    self.db.execute("INSERT INTO event(lifecycle_id,occurred_at_ms,type,details_json) VALUES(?,?,?,?)", (lifecycle_id,now,event_type,_details_json(details)))
+            if start_session:
+                cur = self.db.execute("INSERT INTO service_session(lifecycle_id,started_at_ms,backend_version) VALUES(?,?,?)", (lifecycle_id, now, self.backend_version))
+                self.session_id = cur.lastrowid
+                if collector_started_event:
+                    self.db.execute("INSERT INTO event(lifecycle_id,occurred_at_ms,type,details_json) VALUES(?,?,?,?)", (lifecycle_id, now, "collector_started", "{}"))
+                current=self.db.execute("SELECT last_seen_at_ms FROM lifecycle WHERE id=?",(lifecycle_id,)).fetchone()
+                gap_ms=now-int(current[0]) if current else 0
+                if collector_started_event and gap_ms > self.settings.sample_interval_ms * 2:
+                    self.db.execute("INSERT INTO event(lifecycle_id,occurred_at_ms,type,details_json) VALUES(?,?,?,?)",(lifecycle_id,now,"collection_gap",_details_json({"gap_ms":gap_ms,"reason":"collector_unavailable"})))
         self.lifecycle_id = int(lifecycle_id)
         latest_state = self.db.execute("SELECT persistence_state FROM snapshot WHERE lifecycle_id=? ORDER BY captured_at_ms DESC LIMIT 1", (self.lifecycle_id,)).fetchone()
         if latest_state and self.persistence_state != "paused":
             self.persistence_state = latest_state[0]
         return self.lifecycle_id
+
+    def identity_changed(self, identity: dict[str, Any]) -> bool:
+        if not self.lifecycle_id:
+            return True
+        with self.lock:
+            row = self.db.execute("SELECT * FROM lifecycle WHERE id=?", (self.lifecycle_id,)).fetchone()
+        if not row or row["pid1_start_ticks"] is None:
+            return False
+        marker_changed = bool(row["container_instance_id"] and identity.get("container_instance_id") and row["container_instance_id"] != identity.get("container_instance_id"))
+        return marker_changed or self._fingerprint_changed(row, identity)
 
     def stop_session(self) -> None:
         if not self.session_id or not self.lifecycle_id:
@@ -221,9 +402,12 @@ class Repository:
     def write_snapshot(self, data: SnapshotData, detail_level: str = "full") -> int | None:
         if not self.lifecycle_id:
             raise RuntimeError("lifecycle is not initialized")
-        lifecycle_boot_id = self.db.execute("SELECT boot_id FROM lifecycle WHERE id=?", (self.lifecycle_id,)).fetchone()[0]
-        if data.boot_id != lifecycle_boot_id:
-            raise RuntimeError(f"snapshot boot_id {data.boot_id} does not match active lifecycle")
+        with self.lock:
+            lifecycle = self.db.execute("SELECT * FROM lifecycle WHERE id=?", (self.lifecycle_id,)).fetchone()
+        if not data.identity and lifecycle and data.boot_id != lifecycle["boot_id"]:
+            raise RuntimeError(f"snapshot boot_id {data.boot_id} does not match active legacy lifecycle")
+        if data.identity and lifecycle and self._fingerprint_changed(lifecycle, data.identity):
+            raise RuntimeError("snapshot container identity does not match active lifecycle")
         before = self.managed_bytes()
         reserve = max(2 * 1024 * 1024, self.max_transaction_bytes * 2)
         soft_limit = min(int(self.settings.storage_limit_bytes * 0.85), self.settings.storage_limit_bytes - reserve)
@@ -256,6 +440,8 @@ class Repository:
                     details = json.dumps({"persistence_state": state, "rank_limit": rank_limit}, separators=(",", ":"))
                     self.db.execute("INSERT INTO event(lifecycle_id,snapshot_id,occurred_at_ms,type,details_json) VALUES(?,?,?,?,?)", (self.lifecycle_id,snapshot_id,data.captured_at_ms,"retention",details))
                 self.db.execute("UPDATE lifecycle SET last_seen_at_ms=? WHERE id=?", (data.captured_at_ms,self.lifecycle_id))
+                if data.boot_id != lifecycle["boot_id"]:
+                    self.db.execute("UPDATE lifecycle SET boot_id=? WHERE id=?", (data.boot_id,self.lifecycle_id))
         except sqlite3.OperationalError as exc:
             if "full" not in str(exc).lower():
                 raise
@@ -269,16 +455,16 @@ class Repository:
     def reclaim(self) -> None:
         self.persistence_state = "reclaiming"
         before=self.managed_bytes(); deleted=0
-        # Keep one system-level point per minute outside each historical final
-        # window, but drop its high-cardinality process and user details.
+        # Downsample old current-lifecycle history first so a long-running target
+        # cannot evict the most recent completed lifecycle's restart evidence.
         with self.lock, self.db:
             representatives=self.db.execute("""
               WITH ranked AS (
                 SELECT s.id,row_number() OVER(PARTITION BY s.lifecycle_id,(s.captured_at_ms/60000) ORDER BY s.captured_at_ms DESC) AS n
                 FROM snapshot s JOIN lifecycle l ON l.id=s.lifecycle_id
-                WHERE s.lifecycle_id != ? AND s.captured_at_ms < l.last_seen_at_ms-600000 AND s.detail_level='full'
+                WHERE s.captured_at_ms < l.last_seen_at_ms-600000 AND s.detail_level='full'
               ) SELECT id FROM ranked WHERE n=1
-            """,(self.lifecycle_id,)).fetchall()
+            """).fetchall()
             if representatives:
                 ids=[(row["id"],) for row in representatives]
                 self.db.executemany("DELETE FROM process_sample WHERE snapshot_id=?",ids)
@@ -290,66 +476,56 @@ class Repository:
         target = int(self.settings.storage_limit_bytes * 0.75)
         while self.managed_bytes() > target:
             downgrade_final = False
-            # First remove old high-frequency detail, but preserve the last ten minutes
-            # of every lifecycle and one older point per minute.
+            recent_completed = self.db.execute("SELECT id FROM lifecycle WHERE host_id=? AND id!=? AND termination!='active' ORDER BY last_seen_at_ms DESC LIMIT 1",(self.host_id,self.lifecycle_id)).fetchone()
+            protected_id = recent_completed[0] if recent_completed else -1
+            # Remove high-frequency current history older than ten minutes first.
             rows = self.db.execute("""
                 WITH candidates AS (
                   SELECT s.id,s.captured_at_ms,l.last_seen_at_ms,
                     row_number() OVER (PARTITION BY s.lifecycle_id,(s.captured_at_ms/60000) ORDER BY s.captured_at_ms DESC) AS minute_rank
                   FROM snapshot s JOIN lifecycle l ON l.id=s.lifecycle_id
-                  WHERE s.lifecycle_id != ? AND s.captured_at_ms < l.last_seen_at_ms-600000 AND s.detail_level!='final'
+                  WHERE s.lifecycle_id = ? AND s.captured_at_ms < l.last_seen_at_ms-600000 AND s.detail_level!='final'
                 ) SELECT id FROM candidates WHERE minute_rank>1 ORDER BY captured_at_ms LIMIT 100
             """, (self.lifecycle_id,)).fetchall()
             if not rows:
-                # Then remove the oldest historical detail outside final windows.
+                # Then remove historical detail outside protected final windows.
                 rows = self.db.execute("""
                     SELECT s.id FROM snapshot s JOIN lifecycle l ON l.id=s.lifecycle_id
-                    WHERE s.lifecycle_id != ? AND s.captured_at_ms < l.last_seen_at_ms-600000 AND s.detail_level!='final'
+                    WHERE s.lifecycle_id != ? AND s.detail_level!='final'
                     ORDER BY s.captured_at_ms LIMIT 100
                 """, (self.lifecycle_id,)).fetchall()
             if not rows:
-                # Under severe pressure, delete oldest historical lifecycle detail,
-                # while lifecycle metadata/summary remain queryable.
-                rows = self.db.execute("SELECT s.id FROM snapshot s WHERE s.lifecycle_id != ? AND s.detail_level!='final' ORDER BY s.captured_at_ms LIMIT 100",(self.lifecycle_id,)).fetchall()
-            if not rows:
-                # Final evidence is preferential, not permanent. Under hard pressure,
-                # first strip the oldest final while keeping the newest historical one.
+                # Older final evidence yields before the most recent completed lifecycle.
                 rows = self.db.execute("""
                     SELECT s.id FROM snapshot s JOIN lifecycle l ON l.id=s.lifecycle_id
-                    WHERE s.lifecycle_id != ? AND s.detail_level='final'
-                      AND s.lifecycle_id != COALESCE((
-                        SELECT id FROM lifecycle WHERE host_id=? AND id!=? AND termination!='active'
-                        ORDER BY last_seen_at_ms DESC LIMIT 1
-                      ),-1)
+                    WHERE s.lifecycle_id NOT IN (?,?) AND s.detail_level='final'
                     ORDER BY l.last_seen_at_ms,s.captured_at_ms LIMIT 100
-                """,(self.lifecycle_id,self.host_id,self.lifecycle_id)).fetchall()
-                downgrade_final = bool(rows)
+                """,(self.lifecycle_id,protected_id)).fetchall()
             if not rows:
-                # If final evidence alone exceeds the budget, the hard limit wins:
-                # downgrade even the newest historical final to system-only evidence.
-                rows = self.db.execute("SELECT id FROM snapshot WHERE lifecycle_id!=? AND detail_level='final' ORDER BY captured_at_ms LIMIT 100",(self.lifecycle_id,)).fetchall()
-                downgrade_final = bool(rows)
+                # Shrink the newest completed final window, but keep its last 12
+                # complete snapshots with process and user evidence intact.
+                rows = self.db.execute("""
+                    SELECT id FROM snapshot WHERE lifecycle_id=? AND detail_level='final'
+                      AND id NOT IN (SELECT id FROM snapshot WHERE lifecycle_id=? AND detail_level='final' AND persistence_state='normal' ORDER BY captured_at_ms DESC LIMIT ?)
+                    ORDER BY captured_at_ms LIMIT 100
+                """,(protected_id,protected_id,MIN_FINAL_SNAPSHOTS)).fetchall()
             if not rows:
-                # Current lifecycle is a ring buffer; never delete its latest two snapshots.
+                # Current lifecycle is a ring buffer. Pause rather than deleting the
+                # protected twelve completed snapshots.
                 rows = self.db.execute("SELECT id FROM snapshot WHERE lifecycle_id=? AND detail_level!='final' ORDER BY captured_at_ms", (self.lifecycle_id,)).fetchall()
                 rows = rows[:-2] if len(rows)>2 else []
             if not rows:
+                self.persistence_state = "paused"
                 break
             with self.lock, self.db:
                 affected = self.db.execute("SELECT DISTINCT lifecycle_id FROM snapshot WHERE id IN (%s)" % ",".join("?" * len(rows)), [r["id"] for r in rows]).fetchall()
-                if downgrade_final:
-                    ids=[(r["id"],) for r in rows]
-                    self.db.executemany("DELETE FROM process_sample WHERE snapshot_id=?",ids)
-                    self.db.executemany("DELETE FROM user_sample WHERE snapshot_id=?",ids)
-                    self.db.executemany("UPDATE snapshot SET detail_level='summary_only',persistence_state='system_only' WHERE id=?",ids)
-                else:
-                    self.db.executemany("DELETE FROM snapshot WHERE id=?", [(r["id"],) for r in rows])
+                self.db.executemany("DELETE FROM snapshot WHERE id=?", [(r["id"],) for r in rows])
                 for lifecycle_id in affected:
                     remaining = self.db.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=?", (lifecycle_id[0],)).fetchone()[0]
-                    state = "partial" if remaining and not downgrade_final else "summary_only"
+                    final_count=self.db.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=? AND detail_level='final' AND persistence_state='normal'",(lifecycle_id[0],)).fetchone()[0]
+                    state = "final_minimum" if lifecycle_id[0]==protected_id and final_count==MIN_FINAL_SNAPSHOTS else ("partial" if remaining else "summary_only")
                     self.db.execute("UPDATE lifecycle SET summary_json=? WHERE id=?", (json.dumps({"retention_state":state},separators=(",", ":")), lifecycle_id[0]))
-            if not downgrade_final:
-                deleted += len(rows)
+            deleted += len(rows)
             with self.lock:
                 self.db.execute("PRAGMA incremental_vacuum(256)")
                 checkpoint = self.db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
@@ -360,7 +536,7 @@ class Repository:
                     finally:
                         self.db.execute("PRAGMA busy_timeout=5000")
         self.reclaim_requested = False
-        self.persistence_state = "normal" if self.managed_bytes() < self.settings.storage_limit_bytes else "paused"
+        self.persistence_state = "normal" if self.managed_bytes() < target else "paused"
         if self.persistence_state != "paused":
             self.record_event("retention",{"state":self.persistence_state,"deleted_snapshots":deleted,"before_bytes":before,"after_bytes":self.managed_bytes()})
 
@@ -369,7 +545,7 @@ class Repository:
         with self.lock if connection is None else nullcontext():
             lifecycle = db.execute("SELECT * FROM lifecycle WHERE id=?", (self.lifecycle_id,)).fetchone()
             last = db.execute("SELECT captured_at_ms,scheduled_at_ms,duration_ms FROM snapshot WHERE lifecycle_id=? ORDER BY captured_at_ms DESC LIMIT 1", (self.lifecycle_id,)).fetchone()
-        return {"host_id":self.host_id,"hostname":self.hostname,"boot_id":lifecycle["boot_id"],"lifecycle":dict(lifecycle),"last":dict(last) if last else None,"storage":{"used_bytes":self.managed_bytes(),"limit_bytes":self.settings.storage_limit_bytes,"persistence_state":self.persistence_state}}
+        return {"host_id":self.host_id,"hostname":self.hostname,"boot_id":lifecycle["boot_id"],"lifecycle_key":lifecycle["lifecycle_key"],"lifecycle":dict(lifecycle),"last":dict(last) if last else None,"storage":{"used_bytes":self.managed_bytes(),"limit_bytes":self.settings.storage_limit_bytes,"persistence_state":self.persistence_state,**self.storage_capability}}
 
     def latest(self, connection: sqlite3.Connection | None = None) -> dict[str, Any] | None:
         db = connection or self.db
