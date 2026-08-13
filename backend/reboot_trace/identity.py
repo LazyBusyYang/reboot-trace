@@ -86,7 +86,7 @@ def _marker_storage(mount: MountIdentity | None) -> tuple[str | None, str | None
     return None, f"marker mount {mount.mountpoint} uses {mount.fs_type}; expected the container root overlay"
 
 
-def _open_marker(path: Path, flags: int, mode: int = 0o640) -> int:
+def _open_marker(path: Path, flags: int, mode: int = 0o600) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     before = None
     try:
@@ -100,6 +100,10 @@ def _open_marker(path: Path, flags: int, mode: int = 0o640) -> int:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
             raise OSError("marker is not a regular file")
+        if opened.st_uid != os.geteuid():
+            raise OSError("marker owner does not match the effective user")
+        if stat.S_IMODE(opened.st_mode) & 0o022:
+            raise OSError("marker must not be writable by group or other users")
         if before is not None and not os.path.samestat(before, opened):
             raise OSError("marker changed during secure open")
         after = path.lstat()
@@ -132,7 +136,7 @@ def _read_marker(path: Path) -> str:
 
 
 def _create_marker(path: Path, value: str) -> None:
-    fd = _open_marker(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+    fd = _open_marker(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("marker is not a regular file")
@@ -145,11 +149,20 @@ def _create_marker(path: Path, value: str) -> None:
 def _load_or_create_marker(settings: Settings, namespaces_aligned: bool, namespace_reason: str | None) -> tuple[str | None, str, str | None, str | None, MountIdentity | None]:
     configured = settings.instance_marker_path
     try:
-        configured.parent.mkdir(parents=True, exist_ok=True)
+        if configured.parent.is_symlink():
+            raise OSError("marker parent symlink is forbidden")
+        configured.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent_stat = configured.parent.lstat()
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            raise OSError("marker parent is not a directory")
+        if parent_stat.st_uid != os.geteuid():
+            raise OSError("marker parent owner does not match the effective user")
+        if stat.S_IMODE(parent_stat.st_mode) != 0o700:
+            raise OSError("marker parent permissions must be 0700")
         real_parent = configured.parent.resolve(strict=True)
         path = real_parent / configured.name
     except (OSError, RuntimeError) as exc:
-        return None, "temporarily_unavailable", f"{type(exc).__name__}: marker parent unavailable", None, None
+        return None, "temporarily_unavailable", f"{type(exc).__name__}: marker parent unavailable: {exc}", None, None
     mount = _mount_identity(settings.proc_root, path)
     storage, storage_reason = _marker_storage(mount)
     if settings.identity_scope != "local_container":
@@ -176,7 +189,7 @@ def _load_or_create_marker(settings: Settings, namespaces_aligned: bool, namespa
                 time.sleep(0.005)
         raise RuntimeError("marker initialization did not complete")
     except (OSError, PermissionError, ValueError) as exc:
-        return None, "temporarily_unavailable", f"{type(exc).__name__}: marker unavailable", storage, mount
+        return None, "temporarily_unavailable", f"{type(exc).__name__}: marker unavailable: {exc}", storage, mount
 
 
 @dataclass(frozen=True, slots=True)

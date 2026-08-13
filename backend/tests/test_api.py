@@ -1,6 +1,7 @@
 from reboot_trace.api import create_app
 import asyncio
 import httpx
+from dataclasses import replace
 
 
 def test_openapi_contains_required_contract(settings):
@@ -30,13 +31,14 @@ def test_openapi_contains_required_contract(settings):
 
 def test_http_middleware_uses_read_connection_and_request_id(settings,fake_process):
     async def run():
-        app=create_app(settings)
+        app=create_app(replace(settings,service_token="s"*32))
         async with app.router.lifespan_context(app):
             transport=httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport,base_url="http://test") as client:
                 response=await client.get("/api/v1/status",headers={"X-Request-ID":"acceptance-request"})
                 assert response.status_code == 200
                 assert response.headers["X-Request-ID"] == "acceptance-request"
+                assert response.headers["X-Reboot-Trace-Service-Token"] == "s"*32
                 assert response.json()["host_id"] == "host-test"
                 allowed=await client.options("/api/v1/latest",headers={"Origin":"https://frontend.example","Access-Control-Request-Method":"GET"})
                 assert allowed.headers["access-control-allow-origin"] == "https://frontend.example"

@@ -50,6 +50,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         import socket
         collector = ProcCollector(settings)
+        if settings.require_container_marker and (
+            collector.current_identity.marker_state != "supported"
+            or not collector.current_identity.container_instance_id
+        ):
+            reason = collector.current_identity.marker_reason or "container marker is unavailable"
+            raise RuntimeError(f"required container marker is not supported: {reason}")
         repo = Repository(settings, socket.gethostname(), __version__)
         initial_identity = collector.current_identity
         repo.start_lifecycle(initial_identity.kernel_boot_id, collector.container_started_at_ms(initial_identity), initial_identity.as_dict())
@@ -90,6 +96,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app=FastAPI(title="Reboot Trace API",version=__version__,lifespan=lifespan)
     if settings.cors_origins:
         app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins),allow_credentials=False,allow_methods=["GET","OPTIONS"],allow_headers=["Content-Type","X-Request-ID"])
+
+    @app.middleware("http")
+    async def service_process_identity(request: Request, call_next):
+        response = await call_next(request)
+        if settings.service_token:
+            response.headers["X-Reboot-Trace-Service-Token"] = settings.service_token
+        return response
 
     @app.middleware("http")
     async def database_request_context(request: Request, call_next):

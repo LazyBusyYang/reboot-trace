@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -13,6 +14,18 @@ def _int(name: str, default: int, minimum: int = 1, maximum: int | None = None) 
     if maximum is not None and value > maximum:
         raise ValueError(f"{name} must be <= {maximum}")
     return value
+
+
+def _bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
 
 
 def _project_root() -> Path:
@@ -40,6 +53,8 @@ class Settings:
     host_id_override: str | None = None
     instance_marker_path: Path = Path("/run/reboot-trace/container-instance-id")
     identity_scope: str = "local_container"
+    require_container_marker: bool = False
+    service_token: str | None = None
     project_dir: Path | None = None
 
     @classmethod
@@ -56,6 +71,9 @@ class Settings:
         marker_path = Path(marker_text)
         if not marker_text.startswith("/"):
             raise ValueError("RT_INSTANCE_MARKER_PATH must be absolute")
+        service_token = os.getenv("RT_SERVICE_TOKEN")
+        if service_token is not None and not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", service_token):
+            raise ValueError("RT_SERVICE_TOKEN must contain 16-128 URL-safe characters")
         max_cmd = _int("RT_CMDLINE_MAX_BYTES", 4096)
         if max_cmd > 4096:
             raise ValueError("RT_CMDLINE_MAX_BYTES cannot exceed 4096")
@@ -78,5 +96,7 @@ class Settings:
             host_id_override=os.getenv("RT_HOST_ID"),
             instance_marker_path=marker_path,
             identity_scope=identity_scope,
+            require_container_marker=_bool("RT_REQUIRE_CONTAINER_MARKER"),
+            service_token=service_token,
             project_dir=project_dir,
         )

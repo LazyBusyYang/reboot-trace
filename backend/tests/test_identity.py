@@ -16,6 +16,8 @@ def test_instance_marker_is_created_atomically_and_reused(settings):
     assert first.marker_storage == "container_ephemeral_rootfs"
     assert first.namespace_state == "supported"
     assert settings.instance_marker_path.read_text().strip() == first.container_instance_id
+    assert settings.instance_marker_path.parent.stat().st_mode & 0o777 == 0o700
+    assert settings.instance_marker_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_pid1_fingerprint_changes_with_start_ticks(settings):
@@ -58,6 +60,19 @@ def test_persistent_marker_mount_degrades_without_blocking(settings):
     assert identity.pid1_start_ticks > 0
 
 
+def test_separate_tmpfs_marker_mount_is_not_accepted(settings,tmp_path):
+    marker_root=tmp_path/"tmp"
+    marker_path=marker_root/"reboot-trace"/"container-instance-id"
+    mountpoint="/"+marker_root.as_posix().lstrip("/")
+    mountinfo=settings.proc_root/"1/mountinfo"
+    mountinfo.write_text(mountinfo.read_text()+f"5 1 0:5 / {mountpoint} rw - tmpfs tmpfs rw\n")
+    identity=IdentityReader(replace(settings,instance_marker_path=marker_path)).read()
+    assert identity.container_instance_id is None
+    assert identity.marker_state == "unsupported"
+    assert identity.marker_fs_type == "tmpfs"
+    assert "expected the container root overlay" in identity.marker_reason
+
+
 def test_namespace_mismatch_disables_confirmed_marker(settings):
     current=settings.proc_root/"self/ns/mnt"
     current.unlink();current.write_text("different namespace")
@@ -80,9 +95,9 @@ def test_marker_parent_symlink_to_persistent_mount_is_rejected(settings,monkeypa
         monkeypatch.setattr(Path,"resolve",lambda self,strict=False:settings.data_dir if self==parent else original(self,strict=strict))
     identity=IdentityReader(settings).read()
     assert identity.container_instance_id is None
-    assert identity.marker_state == "unsupported"
-    assert identity.marker_mountpoint.endswith("/data")
-    assert "expected the container root overlay" in identity.marker_reason
+    assert identity.marker_state == "temporarily_unavailable"
+    assert identity.container_instance_id is None
+    assert "marker parent unavailable" in identity.marker_reason
 
 
 def test_marker_file_symlink_is_not_followed(settings,monkeypatch):
@@ -94,9 +109,39 @@ def test_marker_file_symlink_is_not_followed(settings,monkeypatch):
         os.symlink(target,settings.instance_marker_path)
     except OSError:
         original=identity_module._open_marker
-        monkeypatch.setattr(identity_module,"_open_marker",lambda path,flags,mode=0o640: (_ for _ in ()).throw(OSError("marker symlink is forbidden")) if path==settings.instance_marker_path else original(path,flags,mode))
+        monkeypatch.setattr(identity_module,"_open_marker",lambda path,flags,mode=0o600: (_ for _ in ()).throw(OSError("marker symlink is forbidden")) if path==settings.instance_marker_path else original(path,flags,mode))
     identity=IdentityReader(settings).read()
     assert identity.container_instance_id is None
     assert identity.marker_state == "temporarily_unavailable"
     assert identity.marker_storage == "container_ephemeral_rootfs"
     assert "marker unavailable" in identity.marker_reason
+
+
+def test_marker_parent_permissions_must_be_private(settings):
+    parent=settings.instance_marker_path.parent
+    parent.mkdir(parents=True,exist_ok=True)
+    parent.chmod(0o750)
+    identity=IdentityReader(settings).read()
+    assert identity.container_instance_id is None
+    assert identity.marker_state == "temporarily_unavailable"
+    assert "permissions must be 0700" in identity.marker_reason
+
+
+def test_marker_owner_must_match_effective_user(settings,monkeypatch):
+    first=IdentityReader(settings).read()
+    assert first.marker_state == "supported"
+    monkeypatch.setattr(identity_module.os,"geteuid",lambda:settings.instance_marker_path.stat().st_uid+1)
+    identity=IdentityReader(settings).read()
+    assert identity.container_instance_id is None
+    assert identity.marker_state == "temporarily_unavailable"
+    assert "owner does not match" in identity.marker_reason
+
+
+def test_existing_marker_must_not_be_group_writable(settings):
+    first=IdentityReader(settings).read()
+    assert first.marker_state == "supported"
+    settings.instance_marker_path.chmod(0o620)
+    identity=IdentityReader(settings).read()
+    assert identity.container_instance_id is None
+    assert identity.marker_state == "temporarily_unavailable"
+    assert "writable by group or other" in identity.marker_reason

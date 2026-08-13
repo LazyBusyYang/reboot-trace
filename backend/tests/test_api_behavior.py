@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sqlite3
+from dataclasses import replace
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
@@ -19,6 +21,32 @@ def endpoint(app, path: str):
 
 def request(app) -> Request:
     return Request({"type":"http","method":"GET","path":"/","headers":[],"query_string":b"","app":app})
+
+
+def test_required_marker_failure_precedes_database_open(settings):
+    async def run():
+        database=settings.data_dir/"reboot-trace.sqlite3"
+        connection=sqlite3.connect(database)
+        connection.execute("PRAGMA user_version=2")
+        connection.execute("CREATE TABLE legacy_evidence(id INTEGER PRIMARY KEY)")
+        connection.commit();connection.close()
+        unsafe=replace(
+            settings,
+            instance_marker_path=settings.data_dir/"container-instance-id",
+            require_container_marker=True,
+        )
+        app=create_app(unsafe)
+        with pytest.raises(RuntimeError,match="required container marker is not supported"):
+            async with app.router.lifespan_context(app):
+                pass
+        check=sqlite3.connect(database)
+        try:
+            assert check.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert check.execute("SELECT name FROM sqlite_master WHERE name='legacy_evidence'").fetchone()
+            assert not check.execute("SELECT name FROM sqlite_master WHERE name='lifecycle'").fetchone()
+        finally:
+            check.close()
+    asyncio.run(run())
 
 
 def test_status_and_latest_behavior(settings,fake_process):

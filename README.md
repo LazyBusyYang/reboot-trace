@@ -11,7 +11,7 @@ PYTHONPATH=backend .venv/bin/pytest
 RT_PROJECT_DIR="$PWD" RT_PROC_ROOT=/proc RT_HOST_PASSWD=/etc/passwd RT_CORS_ORIGINS=http://localhost:5173 PYTHONPATH=backend .venv/bin/uvicorn reboot_trace.main:app --reload
 ```
 
-后端必须作为普通进程直接运行在目标容器内，使用本地 `/proc` 和目标容器根 overlay 中的 `/run/reboot-trace/container-instance-id`。数据默认建议放在 `<项目根>/var/reboot-trace`；Git 项目目录本身不要求持久，但运维人员必须在启动前确认这个实际数据路径位于适合 SQLite 且能跨目标容器重建保留的挂载，否则应显式设置 `RT_DATA_DIR`。程序会拒绝明显位于根 overlay 或与 marker 同挂载的配置，但不会代替真实重建验收。
+后端必须作为普通进程直接运行在目标容器内，使用本地 `/proc` 和目标容器根 overlay 中的实例 marker。标准部署默认使用 `/run/reboot-trace/container-instance-id`；无法由 root 准备目录的 dev1/4/5/9 使用 `scripts/instances/`，由普通用户在 `/tmp/reboot-trace-${UID}` 创建私有 marker。数据默认建议放在 `<项目根>/var/reboot-trace`；Git 项目目录本身不要求持久，但运维人员必须在启动前确认这个实际数据路径位于适合 SQLite 且能跨目标容器重建保留的挂载，否则应显式设置 `RT_DATA_DIR`。程序会拒绝明显位于根 overlay 或与 marker 同挂载的配置，但不会代替真实重建验收。
 
 ## 前端开发
 
@@ -22,6 +22,7 @@ npm run dev
 ```
 
 编辑 `frontend/public/config/runtime-config.json`，将 `baseUrl` 配置为各后端 HTTPS Ingress 的 `/api/v1` 地址。浏览器请求不携带 Cookie 或 Authorization。
+当前前端兼容 schema 1–3；升级后端到 schema v3 前应先发布新前端，并继续挂载现有生产 `runtime-config.json`，不要把 Ingress 地址写入镜像。
 
 ## 验收
 
