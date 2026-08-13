@@ -21,11 +21,19 @@ def settings(tmp_path: Path) -> Settings:
     (proc / "meminfo").write_text("MemTotal: 100000 kB\nMemAvailable: 50000 kB\nSwapTotal: 1000 kB\nSwapFree: 400 kB\n")
     (proc / "vmstat").write_text("pgfault 10\noom_kill 0\n")
     (proc / "1/root").mkdir(parents=True)
-    (proc / "1/mountinfo").write_text("1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 0:1 / /proc rw - proc proc rw\n")
+    (proc / "1/ns").mkdir(); (proc / "self/ns").mkdir(parents=True)
+    (proc / "1/ns/pid").write_text("namespace")
+    (proc / "1/ns/mnt").write_text("namespace")
+    os.link(proc / "1/ns/pid", proc / "self/ns/pid")
+    os.link(proc / "1/ns/mnt", proc / "self/ns/mnt")
+    (proc / "1/stat").write_text("1 (init) S 0 0 0 0 0 0 0 0 0 0 1 1 0 0 0 0 1 0 100 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
+    (proc / "1/cgroup").write_text("0::/target.slice\n")
+    data_mount="/"+data.as_posix().lstrip("/")
+    (proc / "1/mountinfo").write_text(f"1 0 0:1 / / rw - overlay overlay rw\n2 1 0:2 / /proc rw - proc proc rw\n4 1 8:1 / {data_mount} rw - ext4 /dev/persist rw\n")
     for name in ("cpu","memory","io"):
         (proc / "pressure" / name).write_text("some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=0.10 avg60=0.20 avg300=0.30 total=2\n" if name != "cpu" else "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\n")
     passwd=tmp_path/"passwd"; passwd.write_text("alice:x:1000:1000::/home/alice:/bin/bash\n")
-    return Settings(data,proc,passwd,8*1024*1024,100,5,4096,("https://frontend.example",),"host-test")
+    return Settings(data_dir=data,proc_root=proc,host_passwd=passwd,storage_limit_bytes=8*1024*1024,sample_interval_ms=100,process_top_n=5,cmdline_max_bytes=4096,cors_origins=("https://frontend.example",),host_id_override="host-test",instance_marker_path=tmp_path/"run/reboot-trace/container-instance-id",project_dir=tmp_path)
 
 
 @pytest.fixture

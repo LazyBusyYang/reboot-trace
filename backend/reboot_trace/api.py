@@ -51,7 +51,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         import socket
         collector = ProcCollector(settings)
         repo = Repository(settings, socket.gethostname(), __version__)
-        repo.start_lifecycle(collector.boot_id(), collector.boot_started_at_ms())
+        initial_identity = collector.current_identity
+        repo.start_lifecycle(initial_identity.kernel_boot_id, collector.container_started_at_ms(initial_identity), initial_identity.as_dict())
         app.state.collector, app.state.repo = collector, repo
         app.state.query_semaphore = asyncio.Semaphore(8)
         stop = asyncio.Event()
@@ -65,9 +66,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 scheduled = int(next_wall_ms)
                 try:
                     data = collector.collect(scheduled)
-                    current_boot_id = repo.status()["boot_id"]
-                    if data.boot_id != current_boot_id:
-                        repo.start_lifecycle(data.boot_id, collector.boot_started_at_ms())
+                    if repo.identity_changed(data.identity):
+                        repo.start_lifecycle(data.boot_id, collector.container_started_at_ms(collector.current_identity), data.identity, collector_started_event=False)
+                    data.lifecycle_key = repo.status()["lifecycle_key"]
                     repo.write_snapshot(data)
                     if repo.reclaim_requested and (reclaim_task is None or reclaim_task.done()):
                         reclaim_task = asyncio.create_task(asyncio.to_thread(repo.reclaim))
@@ -155,13 +156,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifecycle=value.pop("lifecycle")
         latest_row=r.latest(connection); capabilities=(latest_row or {}).get("system",{}).get("capabilities",{})
         capabilities["host_usernames"]={"state":"supported" if settings.host_passwd and settings.host_passwd.exists() else "unsupported","reason":None}
-        return _response(r,{**value,"server_time_ms":int(time.time()*1000),"backend_version":__version__,"lifecycle":{"termination":lifecycle["termination"],"started_at_ms":lifecycle["started_at_ms"]},"last_persisted_at_ms":last["captured_at_ms"] if last else None,"collector":{"sample_interval_ms":settings.sample_interval_ms,"last_duration_ms":last["duration_ms"] if last else None,"schedule_delay_ms":last["captured_at_ms"]-last["scheduled_at_ms"] if last else None,"last_error":getattr(request.app.state,"last_error",None)},"capabilities":capabilities})
+        active_collector=getattr(request.app.state,"collector",None)
+        marker_state=active_collector.current_identity.marker_state if active_collector else ("supported" if lifecycle["container_instance_id"] else "unsupported")
+        marker_reason=active_collector.current_identity.marker_reason if active_collector else None
+        capabilities["container_identity"]={"state":marker_state,"reason":marker_reason}
+        persisted_identity={key:lifecycle[key] for key in ("container_instance_id","pid1_start_ticks","pid_namespace_inode","cgroup_hash","detection_method","detection_confidence")}
+        runtime_identity=active_collector.current_identity.as_dict() if active_collector else {}
+        return _response(r,{**value,"server_time_ms":int(time.time()*1000),"backend_version":__version__,"identity":{**persisted_identity,**{key:runtime_identity.get(key) for key in ("identity_scope","marker_storage","marker_mountpoint","marker_fs_type","namespace_state","namespace_reason")}},"lifecycle":{"termination":lifecycle["termination"],"started_at_ms":lifecycle["started_at_ms"]},"last_persisted_at_ms":last["captured_at_ms"] if last else None,"collector":{"sample_interval_ms":settings.sample_interval_ms,"last_duration_ms":last["duration_ms"] if last else None,"schedule_delay_ms":last["captured_at_ms"]-last["scheduled_at_ms"] if last else None,"last_error":getattr(request.app.state,"last_error",None)},"capabilities":capabilities})
 
     @app.get("/api/v1/latest",response_model=LatestResponse)
     async def latest(request: Request):
         r=repo(request); row=r.latest(db(request))
         if not row: raise HTTPException(404,"NOT_FOUND")
-        return _response(r,{"boot_id":r.status()["boot_id"],"snapshot_id":row["id"],"captured_at_ms":row["captured_at_ms"],"detail_level":row["detail_level"],"system":row["system"],"collector":{"duration_ms":row["duration_ms"],"schedule_delay_ms":row["captured_at_ms"]-row["scheduled_at_ms"]},"storage":r.status()["storage"]})
+        status_value=r.status()
+        return _response(r,{"boot_id":status_value["boot_id"],"lifecycle_key":status_value["lifecycle_key"],"snapshot_id":row["id"],"captured_at_ms":row["captured_at_ms"],"detail_level":row["detail_level"],"system":row["system"],"collector":{"duration_ms":row["duration_ms"],"schedule_delay_ms":row["captured_at_ms"]-row["scheduled_at_ms"]},"storage":status_value["storage"]})
 
     @app.get("/api/v1/config/public",response_model=PublicConfigResponse)
     async def public_config(request: Request): return _response(repo(request),{"sample_interval_ms":settings.sample_interval_ms,"process_top_n":settings.process_top_n,"storage_limit_bytes":settings.storage_limit_bytes,"cmdline_max_bytes":settings.cmdline_max_bytes})
@@ -181,10 +189,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row["retention_state"]=summary.get("retention_state", "complete" if row["snapshot_count"] else "summary_only")
         return _response(r,{"items":rows,"next_cursor":_cursor(rows[-1]["id"],scope) if more else None})
 
-    def lifecycle_row(r:Repository,connection:sqlite3.Connection,boot_id:str):
-        row=connection.execute("SELECT * FROM lifecycle WHERE host_id=? AND boot_id=?",(r.host_id,boot_id)).fetchone()
-        if not row: raise HTTPException(404,"NOT_FOUND")
-        return row
+    def lifecycle_row(r:Repository,connection:sqlite3.Connection,lifecycle_ref:str):
+        exact=connection.execute("SELECT * FROM lifecycle WHERE host_id=? AND lifecycle_key=?",(r.host_id,lifecycle_ref)).fetchone()
+        if exact:return exact
+        rows=connection.execute("SELECT * FROM lifecycle WHERE host_id=? AND boot_id=? ORDER BY id DESC LIMIT 2",(r.host_id,lifecycle_ref)).fetchall()
+        if not rows:raise HTTPException(404,"NOT_FOUND")
+        if len(rows)>1:raise HTTPException(409,"AMBIGUOUS_LIFECYCLE")
+        return rows[0]
+
+    def lifecycle_payload(lc:sqlite3.Row) -> dict[str,str]:
+        return {"boot_id":lc["boot_id"],"lifecycle_key":lc["lifecycle_key"]}
 
     @app.get("/api/v1/lifecycles/{boot_id}",response_model=LifecycleResponse)
     async def lifecycle(request:Request,boot_id:str):
@@ -199,8 +213,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if cursor_id: sql+=" AND id<?"; params.append(cursor_id)
         sql+=" ORDER BY id DESC LIMIT ?"; params.append(limit+1); rows=[dict(x) for x in connection.execute(sql,params).fetchall()]; more=len(rows)>limit; rows=rows[:limit]
         for row in rows:
-            row.pop("lifecycle_id",None); row["boot_id"]=boot_id
-        return _response(r,{"boot_id":boot_id,"items":rows,"next_cursor":_cursor(rows[-1]["id"],scope) if more else None})
+            row.pop("lifecycle_id",None); row.update(lifecycle_payload(lc))
+        return _response(r,{**lifecycle_payload(lc),"items":rows,"next_cursor":_cursor(rows[-1]["id"],scope) if more else None})
 
     def full_snapshot(connection:sqlite3.Connection,lc_id:int,snapshot_id:int)->dict[str,Any]:
         row=connection.execute("SELECT s.*,ss.data_json FROM snapshot s JOIN system_sample ss ON ss.snapshot_id=s.id WHERE s.lifecycle_id=? AND s.id=?",(lc_id,snapshot_id)).fetchone()
@@ -215,7 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/lifecycles/{boot_id}/snapshots/{snapshot_id}",response_model=FullSnapshotResponse)
     async def snapshot(request:Request,boot_id:str,snapshot_id:int):
-        r=repo(request); connection=db(request); lc=lifecycle_row(r,connection,boot_id); return _response(r,{"boot_id":boot_id,**full_snapshot(connection,lc["id"],snapshot_id)})
+        r=repo(request); connection=db(request); lc=lifecycle_row(r,connection,boot_id); return _response(r,{**lifecycle_payload(lc),**full_snapshot(connection,lc["id"],snapshot_id)})
 
     @app.get("/api/v1/lifecycles/{boot_id}/final",response_model=FinalResponse)
     async def final(request:Request,boot_id:str,count:int=Query(1,ge=1,le=10)):
@@ -223,8 +237,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not ids: raise HTTPException(410,"DATA_REMOVED")
         snapshots_payload=[]
         for snapshot_id in ids:
-            item=full_snapshot(connection,lc["id"],snapshot_id); item.pop("processes",None); item.pop("lifecycle_id",None); item["boot_id"]=boot_id; snapshots_payload.append(item)
-        return _response(r,{"boot_id":boot_id,"termination":lc["termination"],"last_persisted_at_ms":lc["last_seen_at_ms"],"evidence_gap_ms":None,"snapshots":snapshots_payload})
+            item=full_snapshot(connection,lc["id"],snapshot_id); item.pop("processes",None); item.pop("lifecycle_id",None); item.update(lifecycle_payload(lc)); snapshots_payload.append(item)
+        following=connection.execute("SELECT identity_first_observed_at_ms FROM lifecycle WHERE host_id=? AND id>? ORDER BY id LIMIT 1",(r.host_id,lc["id"])).fetchone()
+        evidence_gap=max(0,following[0]-lc["last_seen_at_ms"]) if following and following[0] else None
+        return _response(r,{**lifecycle_payload(lc),"termination":lc["termination"],"last_persisted_at_ms":lc["last_seen_at_ms"],"evidence_gap_ms":evidence_gap,"snapshots":snapshots_payload})
 
     @app.get("/api/v1/lifecycles/{boot_id}/events",response_model=EventPage)
     async def events(request:Request,boot_id:str,limit:int=Query(100,ge=1,le=1000),cursor:str|None=None):
@@ -235,8 +251,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for x in raw[:limit]:
             item=dict(x); item["details"]=json.loads(item.pop("details_json")); rows.append(item)
         for row in rows:
-            row.pop("lifecycle_id",None); row["boot_id"]=boot_id
-        return _response(r,{"boot_id":boot_id,"items":rows,"next_cursor":_cursor(rows[-1]["id"],scope) if more else None})
+            row.pop("lifecycle_id",None); row.update(lifecycle_payload(lc))
+        return _response(r,{**lifecycle_payload(lc),"items":rows,"next_cursor":_cursor(rows[-1]["id"],scope) if more else None})
 
     @app.get("/api/v1/lifecycles/{boot_id}/snapshots/{snapshot_id}/processes",response_model=ProcessPage)
     async def processes(request:Request,boot_id:str,snapshot_id:int,dimension:str="cpu",user:int|None=None,limit:int=Query(50,ge=1,le=1000),cursor:str|None=None):
@@ -249,7 +265,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if cursor_rank is not None: sql+=" AND r.rank>?"; params.append(cursor_rank)
         sql+=" ORDER BY r.rank LIMIT ?"; params.append(limit+1); rows=[dict(x) for x in connection.execute(sql,params)]; more=len(rows)>limit; rows=rows[:limit]
         for row in rows: row["truncated"]=bool(row["truncated"])
-        return _response(r,{"boot_id":boot_id,"snapshot_id":snapshot_id,"dimension":dimension,"items":rows,"next_cursor":_cursor(rows[-1]["rank"],scope) if more else None})
+        return _response(r,{**lifecycle_payload(lc),"snapshot_id":snapshot_id,"dimension":dimension,"items":rows,"next_cursor":_cursor(rows[-1]["rank"],scope) if more else None})
 
     @app.get("/api/v1/lifecycles/{boot_id}/snapshots/{snapshot_id}/users",response_model=UserPage)
     async def users(request:Request,boot_id:str,snapshot_id:int):
@@ -257,7 +273,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not connection.execute("SELECT 1 FROM snapshot WHERE lifecycle_id=? AND id=?",(lc["id"],snapshot_id)).fetchone(): raise HTTPException(404,"NOT_FOUND")
         rows=[json.loads(x[0]) for x in connection.execute("SELECT data_json FROM user_sample WHERE snapshot_id=?",(snapshot_id,))]
         rows.sort(key=lambda x:x.get("rss_bytes") or 0,reverse=True)
-        return _response(r,{"boot_id":boot_id,"snapshot_id":snapshot_id,"items":rows})
+        return _response(r,{**lifecycle_payload(lc),"snapshot_id":snapshot_id,"items":rows})
 
     @app.get("/api/v1/lifecycles/{boot_id}/series",response_model=SeriesResponse)
     async def series(request:Request,boot_id:str,metrics:str,from_ms:int|None=None,to_ms:int|None=None,resolution:str="raw"):
@@ -283,7 +299,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if previous is not None and ts-previous>expected*2:points.append([previous+expected,None])
                 points.append([ts,data.get(metric)]);previous=ts
             payload.append({"metric":metric,"unit":units[metric],"points":points})
-        return _response(r,{"boot_id":boot_id,"requested_resolution":resolution,"actual_resolution":resolution,"series":payload})
+        return _response(r,{**lifecycle_payload(lc),"requested_resolution":resolution,"actual_resolution":resolution,"series":payload})
 
     @app.get("/api/v1/lifecycles/{boot_id}/compare",response_model=CompareResponse)
     async def compare(request:Request,boot_id:str,left_snapshot_id:int,right_snapshot_id:int):
@@ -305,7 +321,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for metric in ("cpu_percent","rss_bytes","swap_bytes","read_bps","write_bps","process_count","thread_count"):
                 av,bv=a.get(metric),b.get(metric);item[metric+"_left"]=av;item[metric+"_right"]=bv;item[metric+"_delta"]=(bv-av) if isinstance(av,(int,float)) and isinstance(bv,(int,float)) else None
             user_deltas.append(item)
-        return _response(r,{"boot_id":boot_id,"left_snapshot_id":left_snapshot_id,"right_snapshot_id":right_snapshot_id,"system_deltas":deltas,"processes":{"created":created,"exited":exited,"continued":continued,"pid_reused":reused},"users":user_deltas})
+        return _response(r,{**lifecycle_payload(lc),"left_snapshot_id":left_snapshot_id,"right_snapshot_id":right_snapshot_id,"system_deltas":deltas,"processes":{"created":created,"exited":exited,"continued":continued,"pid_reused":reused},"users":user_deltas})
 
     @app.get("/api/v1/lifecycles/{boot_id}/processes/{pid}",response_model=ProcessHistoryResponse)
     async def process_history(request:Request,boot_id:str,pid:int,create_time_ms:int,from_ms:int|None=None,to_ms:int|None=None,limit:int=Query(100,ge=1,le=1000),cursor:str|None=None):
@@ -319,6 +335,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rows=[dict(x) for x in connection.execute(sql,params)]; more=len(rows)>limit;rows=rows[:limit]
         if not rows: raise HTTPException(404,"NOT_FOUND")
         for row in rows: row["truncated"]=bool(row["truncated"])
-        return _response(r,{"boot_id":boot_id,"pid":pid,"create_time_ms":create_time_ms,"items":rows,"next_cursor":_cursor(rows[-1]["snapshot_id"],scope) if more else None})
+        return _response(r,{**lifecycle_payload(lc),"pid":pid,"create_time_ms":create_time_ms,"items":rows,"next_cursor":_cursor(rows[-1]["snapshot_id"],scope) if more else None})
 
     return app

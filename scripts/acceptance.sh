@@ -19,8 +19,13 @@ done
 grep -q 'npm ci' frontend/Dockerfile || { echo "FAIL: frontend image must use lockfile install" >&2; exit 1; }
 grep -q '^USER reboot-trace' backend/Dockerfile || { echo "FAIL: backend image must be non-root" >&2; exit 1; }
 grep -q '^USER nginx' frontend/Dockerfile || { echo "FAIL: frontend image must be non-root" >&2; exit 1; }
-grep -q 'pid: host' deploy/compose.example.yaml || { echo "FAIL: compose must expose host PID namespace" >&2; exit 1; }
-grep -q '/proc:/host/proc:ro' deploy/compose.example.yaml || { echo "FAIL: compose must mount host procfs read-only" >&2; exit 1; }
+if grep -q 'pid: host' deploy/compose.example.yaml || grep -q '/proc:/host/proc' deploy/compose.example.yaml; then
+  echo "FAIL: compose must not claim host PID/proc can identify a sibling target container" >&2; exit 1
+fi
+grep -q 'native process inside each target container' deploy/compose.example.yaml || { echo "FAIL: compose must state the native collector topology" >&2; exit 1; }
+grep -q '^/var/reboot-trace/$' .gitignore || { echo "FAIL: runtime database directory must be ignored" >&2; exit 1; }
+grep -q 'operator_verification_required' backend/reboot_trace/database.py || { echo "FAIL: storage status must preserve the operator verification boundary" >&2; exit 1; }
+grep -q -- '--uid 10001' backend/Dockerfile || { echo "FAIL: backend image must use fixed uid 10001" >&2; exit 1; }
 
 test -f frontend/package-lock.json || { echo "FAIL: frontend/package-lock.json is missing" >&2; exit 1; }
 (

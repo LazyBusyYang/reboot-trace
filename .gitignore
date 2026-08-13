@@ -8,3 +8,4 @@ frontend/*.tsbuildinfo
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+/var/reboot-trace/

@@ -63,8 +63,8 @@ export async function api<T>(backend: BackendConfig, path: string, timeout = 800
     if (value.api_version && value.api_version !== '1') {
       throw new ApiError(`API 版本不兼容: ${value.api_version}`, 'incompatible', undefined, 'VERSION_UNSUPPORTED')
     }
-    if (typeof value.schema_version === 'number' && (value.schema_version < 1 || value.schema_version > 2)) {
-      throw new ApiError(`数据结构版本不兼容: ${value.schema_version}（前端支持 1–2）`, 'incompatible', undefined, 'VERSION_UNSUPPORTED')
+    if (typeof value.schema_version === 'number' && (value.schema_version < 1 || value.schema_version > 3)) {
+      throw new ApiError(`数据结构版本不兼容: ${value.schema_version}（前端支持 1–3）`, 'incompatible', undefined, 'VERSION_UNSUPPORTED')
     }
     return value as T
   } catch (error) {

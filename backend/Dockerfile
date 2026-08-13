@@ -10,11 +10,10 @@ LABEL org.opencontainers.image.title="Reboot Trace Backend" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/LazyBusyYang/reboot-trace"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-RUN groupadd --system reboot-trace && useradd --system --gid reboot-trace --home /nonexistent reboot-trace
+RUN groupadd --system --gid 10001 reboot-trace && useradd --system --uid 10001 --gid reboot-trace --home /nonexistent reboot-trace
 COPY --from=builder /install /usr/local
 WORKDIR /app
 COPY backend/reboot_trace ./reboot_trace
-RUN mkdir -p /var/lib/reboot-trace && chown reboot-trace:reboot-trace /var/lib/reboot-trace
 USER reboot-trace
 EXPOSE 8080
 STOPSIGNAL SIGTERM

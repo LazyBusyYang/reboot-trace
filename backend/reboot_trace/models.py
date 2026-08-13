@@ -39,3 +39,5 @@ class SnapshotData:
     processes: list[ProcessSample]
     users: list[dict[str, Any]]
     events: list[dict[str, Any]] = field(default_factory=list)
+    lifecycle_key: str | None = None
+    identity: dict[str, Any] = field(default_factory=dict)

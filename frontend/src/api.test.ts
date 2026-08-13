@@ -29,4 +29,9 @@ describe('API client',()=>{
     vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({api_version:'1',schema_version:99})}));vi.stubGlobal('crypto',{randomUUID:()=> 'request-id'})
     await expect(api({id:'a',name:'A',baseUrl:'https://host.example/api/v1'},'/status')).rejects.toMatchObject({kind:'incompatible',code:'VERSION_UNSUPPORTED'})
   })
+  it('accepts schema v3 lifecycle identity responses',async()=>{
+    const payload={api_version:'1',schema_version:3,lifecycle_key:'instance-a',boot_id:'kernel-a'}
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>payload}));vi.stubGlobal('crypto',{randomUUID:()=> 'request-id'})
+    await expect(api({id:'a',name:'A',baseUrl:'https://host.example/api/v1'},'/status')).resolves.toMatchObject(payload)
+  })
 })

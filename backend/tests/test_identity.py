@@ -1,0 +1,102 @@
+from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+import os
+from pathlib import Path
+import uuid
+
+import reboot_trace.identity as identity_module
+from reboot_trace.identity import IdentityReader
+
+
+def test_instance_marker_is_created_atomically_and_reused(settings):
+    first=IdentityReader(settings).read()
+    second=IdentityReader(settings).read()
+    assert first.container_instance_id == second.container_instance_id
+    assert first.marker_state == "supported"
+    assert first.marker_storage == "container_ephemeral_rootfs"
+    assert first.namespace_state == "supported"
+    assert settings.instance_marker_path.read_text().strip() == first.container_instance_id
+
+
+def test_pid1_fingerprint_changes_with_start_ticks(settings):
+    first=IdentityReader(settings).read()
+    stat=(settings.proc_root/"1/stat").read_text()
+    fields=stat.split();fields[21]="200"
+    (settings.proc_root/"1/stat").write_text(" ".join(fields)+"\n")
+    second=IdentityReader(settings).read()
+    assert first.container_instance_id == second.container_instance_id
+    assert first.fingerprint != second.fingerprint
+
+
+def test_same_reader_observes_marker_removal_and_replacement(settings):
+    reader=IdentityReader(settings)
+    first=reader.read()
+    settings.instance_marker_path.unlink()
+    second=reader.read()
+    assert second.container_instance_id != first.container_instance_id
+    replacement=str(uuid.uuid4())
+    settings.instance_marker_path.write_text(replacement+"\n")
+    assert reader.read().container_instance_id == replacement
+
+
+def test_concurrent_marker_initialization_never_overwrites_winner(settings):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        identities=list(pool.map(lambda _:IdentityReader(settings).read(),range(16)))
+    values={identity.container_instance_id for identity in identities}
+    assert len(values)==1
+    assert settings.instance_marker_path.read_text().strip()==next(iter(values))
+
+
+def test_persistent_marker_mount_degrades_without_blocking(settings):
+    mountinfo=settings.proc_root/"1/mountinfo"
+    mountinfo.write_text(mountinfo.read_text()+"3 1 8:1 / /run rw - ext4 /dev/run rw\n")
+    local=replace(settings,instance_marker_path=settings.data_dir/"marker")
+    identity=IdentityReader(local).read()
+    assert identity.container_instance_id is None
+    assert identity.marker_state == "unsupported"
+    assert "expected the container root overlay" in identity.marker_reason
+    assert identity.pid1_start_ticks > 0
+
+
+def test_namespace_mismatch_disables_confirmed_marker(settings):
+    current=settings.proc_root/"self/ns/mnt"
+    current.unlink();current.write_text("different namespace")
+    identity=IdentityReader(settings).read()
+    assert identity.container_instance_id is None
+    assert identity.marker_state == "unsupported"
+    assert identity.namespace_state == "unsupported"
+    assert "different mnt namespaces" in identity.namespace_reason
+
+
+def test_marker_parent_symlink_to_persistent_mount_is_rejected(settings,monkeypatch):
+    parent=settings.instance_marker_path.parent
+    parent.mkdir(parents=True,exist_ok=True)
+    parent.rmdir()
+    try:
+        os.symlink(settings.data_dir,parent,target_is_directory=True)
+    except OSError:
+        parent.mkdir()
+        original=Path.resolve
+        monkeypatch.setattr(Path,"resolve",lambda self,strict=False:settings.data_dir if self==parent else original(self,strict=strict))
+    identity=IdentityReader(settings).read()
+    assert identity.container_instance_id is None
+    assert identity.marker_state == "unsupported"
+    assert identity.marker_mountpoint.endswith("/data")
+    assert "expected the container root overlay" in identity.marker_reason
+
+
+def test_marker_file_symlink_is_not_followed(settings,monkeypatch):
+    parent=settings.instance_marker_path.parent
+    parent.mkdir(parents=True,exist_ok=True)
+    target=settings.data_dir/"persisted-marker"
+    target.write_text(str(uuid.uuid4())+"\n")
+    try:
+        os.symlink(target,settings.instance_marker_path)
+    except OSError:
+        original=identity_module._open_marker
+        monkeypatch.setattr(identity_module,"_open_marker",lambda path,flags,mode=0o640: (_ for _ in ()).throw(OSError("marker symlink is forbidden")) if path==settings.instance_marker_path else original(path,flags,mode))
+    identity=IdentityReader(settings).read()
+    assert identity.container_instance_id is None
+    assert identity.marker_state == "temporarily_unavailable"
+    assert identity.marker_storage == "container_ephemeral_rootfs"
+    assert "marker unavailable" in identity.marker_reason

@@ -1,6 +1,6 @@
 # Reboot Trace
 
-面向 Linux 跳板机异常重启调查的轻量取证系统。后端持续采集宿主机资源、各维度 Top-N 进程与用户汇总，并在有限 SQLite 空间内跨 boot 生命周期保存；Vue 前端通过 HTTPS Ingress 跨域聚合多个后端。
+面向 Linux 容器异常重启调查的轻量取证系统。后端持续采集目标环境资源、各维度 Top-N 进程与用户汇总，并在有限 SQLite 空间内跨容器实例生命周期保存；Vue 前端通过 HTTPS Ingress 跨域聚合多个后端。
 
 ## 后端开发
 
@@ -8,10 +8,10 @@
 python3 -m venv .venv
 .venv/bin/pip install -r backend/requirements-test.lock
 PYTHONPATH=backend .venv/bin/pytest
-RT_DATA_DIR=/tmp/reboot-trace RT_PROC_ROOT=/proc RT_HOST_PASSWD=/etc/passwd RT_CORS_ORIGINS=http://localhost:5173 PYTHONPATH=backend .venv/bin/uvicorn reboot_trace.main:app --reload
+RT_PROJECT_DIR="$PWD" RT_PROC_ROOT=/proc RT_HOST_PASSWD=/etc/passwd RT_CORS_ORIGINS=http://localhost:5173 PYTHONPATH=backend .venv/bin/uvicorn reboot_trace.main:app --reload
 ```
 
-容器部署必须提供宿主机 PID namespace，并只读挂载 `/proc` 和可选 `/etc/passwd`，详见 `docs/deployment.html`。
+后端必须作为普通进程直接运行在目标容器内，使用本地 `/proc` 和目标容器根 overlay 中的 `/run/reboot-trace/container-instance-id`。数据默认建议放在 `<项目根>/var/reboot-trace`；Git 项目目录本身不要求持久，但运维人员必须在启动前确认这个实际数据路径位于适合 SQLite 且能跨目标容器重建保留的挂载，否则应显式设置 `RT_DATA_DIR`。程序会拒绝明显位于根 overlay 或与 marker 同挂载的配置，但不会代替真实重建验收。
 
 ## 前端开发
 

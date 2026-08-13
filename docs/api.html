@@ -218,44 +218,53 @@ footer a {
 <section><h2>1. 约定</h2><ul><li>前缀：<code>/api/v1</code>；响应 <code>Content-Type: application/json</code>，并返回 <code>api_version: "1"</code> 与整数 <code>schema_version</code>。</li><li>时间字段使用 Unix 毫秒 UTC 并以 <code>_at_ms</code> 结尾；持续时间以 <code>_ms</code> 结尾。容量统一为 bytes，速率统一为 bytes/s，比例字段以 <code>_percent</code> 结尾。</li><li>列表使用不透明 cursor 分页，返回 <code>items</code>、<code>next_cursor</code>；limit 默认 100，最大 1000。cursor 绑定筛选与排序，参数改变后旧 cursor 返回 <code>INVALID_CURSOR</code>。</li><li>成功响应带 <code>host_id</code>；错误使用统一 <code>{code,message,details,request_id,host_id?}</code>。未知、不支持和读取失败使用 <code>null</code>，不得用 0 代替。</li><li>大范围时序查询必须指定 <code>resolution=raw|10s|1m|5m</code>；服务端可返回更粗但不得更细的实际 resolution，并拒绝超过 5000 点的请求。</li></ul></section>
 <section><h2>2. 服务与主机</h2><table><thead><tr><th>方法与路径</th><th>用途</th></tr></thead><tbody>
 <tr><td>GET /health/live</td><td>进程存活，不访问数据库。</td></tr><tr><td>GET /health/ready</td><td>数据库可读、生命周期初始化完成。</td></tr>
-<tr><td>GET /api/v1/status</td><td>host_id、hostname、boot_id、版本、当前生命周期、最后落盘时间、存储使用和 capabilities。</td></tr>
+<tr><td>GET /api/v1/status</td><td>host_id、hostname、lifecycle_key、identity、kernel boot_id、版本、当前生命周期、最后落盘时间、存储使用和 capabilities。</td></tr>
 <tr><td>GET /api/v1/latest</td><td>当前生命周期最近一次成功持久化的系统样本、采样健康与数据完整度；供多主机总览单请求刷新，不返回进程明细。</td></tr>
 <tr><td>GET /api/v1/config/public</td><td>采样周期、Top N、保留预算等非敏感有效配置。</td></tr>
 </tbody></table></section>
-<section><h2>3. 生命周期</h2><table><thead><tr><th>方法与路径</th><th>参数与结果</th></tr></thead><tbody>
+<section><h2>3. 生命周期</h2><p>schema v3 使用 <code>lifecycle_key</code> 作为路径标识；<code>boot_id</code> 表示 kernel boot ID。旧 boot ID 仅在唯一匹配时兼容，多个容器实例共享 boot ID 时返回 <code>AMBIGUOUS_LIFECYCLE</code>。</p><table><thead><tr><th>方法与路径</th><th>参数与结果</th></tr></thead><tbody>
 <tr><td>GET /api/v1/lifecycles</td><td><code>termination, from_ms, to_ms, limit, cursor</code>；按最后观察时间倒序。</td></tr>
-<tr><td>GET /api/v1/lifecycles/{boot_id}</td><td>元数据、摘要、数据范围和存储完整度。</td></tr>
-<tr><td>GET /api/v1/lifecycles/{boot_id}/final</td><td>最后完整快照；支持 <code>count</code> 返回末尾若干快照。</td></tr>
-<tr><td>GET /api/v1/lifecycles/{boot_id}/events</td><td>事件时间线和分页。</td></tr>
+<tr><td>GET /api/v1/lifecycles/{lifecycle_key}</td><td>元数据、摘要、数据范围和存储完整度。</td></tr>
+<tr><td>GET /api/v1/lifecycles/{lifecycle_key}/final</td><td>最后完整快照；支持 <code>count</code> 返回末尾若干快照。</td></tr>
+<tr><td>GET /api/v1/lifecycles/{lifecycle_key}/events</td><td>事件时间线和分页。</td></tr>
 </tbody></table></section>
 <section><h2>4. 快照和序列</h2><table><thead><tr><th>方法与路径</th><th>用途</th></tr></thead><tbody>
-<tr><td>GET /api/v1/lifecycles/{boot_id}/snapshots</td><td>按范围列出快照元数据；<code>from_ms,to_ms,detail_level</code>。</td></tr>
-<tr><td>GET /api/v1/lifecycles/{boot_id}/snapshots/{snapshot_id}</td><td>完整系统样本和可选进程/用户明细。</td></tr>
-<tr><td>GET /api/v1/lifecycles/{boot_id}/series</td><td><code>metrics,from_ms,to_ms,resolution</code>；供趋势图使用。</td></tr>
-<tr><td>GET /api/v1/lifecycles/{boot_id}/compare</td><td><code>left_snapshot_id,right_snapshot_id</code>；返回新增、消失及资源增量。</td></tr>
+<tr><td>GET /api/v1/lifecycles/{lifecycle_key}/snapshots</td><td>按范围列出快照元数据；<code>from_ms,to_ms,detail_level</code>。</td></tr>
+<tr><td>GET /api/v1/lifecycles/{lifecycle_key}/snapshots/{snapshot_id}</td><td>完整系统样本和可选进程/用户明细。</td></tr>
+<tr><td>GET /api/v1/lifecycles/{lifecycle_key}/series</td><td><code>metrics,from_ms,to_ms,resolution</code>；供趋势图使用。</td></tr>
+<tr><td>GET /api/v1/lifecycles/{lifecycle_key}/compare</td><td><code>left_snapshot_id,right_snapshot_id</code>；返回新增、消失及资源增量。</td></tr>
 </tbody></table></section>
 <section><h2>5. 进程与用户</h2><table><thead><tr><th>方法与路径</th><th>用途</th></tr></thead><tbody>
 <tr><td>GET .../snapshots/{id}/processes</td><td><code>dimension=cpu|rss|swap|read|write</code>、user、limit、cursor；返回排行和脱敏命令。</td></tr>
 <tr><td>GET .../snapshots/{id}/users</td><td>该快照各用户聚合排行。</td></tr>
 <tr><td>GET .../processes/{pid}</td><td>必须同时提供 <code>create_time_ms</code>，查询生命周期内该进程轨迹。</td></tr>
-</tbody></table><p>省略号表示 <code>/api/v1/lifecycles/{boot_id}</code>。</p></section>
+</tbody></table><p>省略号表示 <code>/api/v1/lifecycles/{lifecycle_key}</code>。</p></section>
 <section><h2>6. 字段级合同</h2><h3>6.1 公共枚举</h3><table><thead><tr><th>枚举</th><th>允许值</th></tr></thead><tbody><tr><td>termination</td><td>active、clean_shutdown_observed、unclean_or_unknown</td></tr><tr><td>detail_level</td><td>full、downsampled、final、summary_only</td></tr><tr><td>persistence_state</td><td>normal、reclaiming、degraded_processes、system_only、paused</td></tr><tr><td>dimension</td><td>cpu、rss、swap、read、write</td></tr><tr><td>capability state</td><td>supported、unsupported、permission_denied、temporarily_unavailable</td></tr></tbody></table>
 <h3>6.2 StatusResponse</h3><pre><code>{
-  "api_version": "1", "schema_version": 2,
+  "api_version": "1", "schema_version": 3,
   "host_id": "uuid", "hostname": "Maoshanwang_dev_01",
   "server_time_ms": 1786500000000,
-  "boot_id": "uuid", "backend_version": "semver",
+  "lifecycle_key": "instance:uuid", "boot_id": "kernel-uuid", "backend_version": "semver",
+  "identity": {"container_instance_id":"uuid", "pid1_start_ticks":12345,
+               "pid_namespace_inode":"4026532448", "cgroup_hash":"sha256",
+               "detection_method":"instance_marker_pid1", "detection_confidence":"confirmed",
+               "identity_scope":"local_container", "marker_storage":"container_ephemeral_rootfs",
+               "marker_mountpoint":"/", "marker_fs_type":"overlay",
+               "namespace_state":"supported", "namespace_reason":null},
   "lifecycle": {"termination":"active", "started_at_ms":1786490000000},
   "last_persisted_at_ms": 1786500000000,
   "storage": {"used_bytes":31457280, "limit_bytes":52428800,
-              "persistence_state":"normal"},
+              "persistence_state":"normal", "data_path":"/project/var/reboot-trace",
+              "mountpoint":"/project", "fs_type":"ext4",
+              "persistence_capability":"operator_verification_required",
+              "persistence_reason":"separate mount observed; verify retention across a real target-container rebuild"},
   "collector": {"sample_interval_ms":5000, "last_duration_ms":83,
                 "schedule_delay_ms":12},
   "capabilities": {"psi_memory":{"state":"supported","reason":null}}
 }</code></pre><p><code>server_time_ms</code> 用于浏览器结合请求往返时间估算节点时钟偏差。capabilities 的键来自版本化指标字典，前端必须容忍未知键。</p>
 <h3>6.3 LatestResponse</h3><pre><code>{
-  "api_version":"1", "schema_version":2, "host_id":"uuid",
-  "boot_id":"uuid", "snapshot_id":991,
+  "api_version":"1", "schema_version":3, "host_id":"uuid",
+  "lifecycle_key":"instance:uuid", "boot_id":"kernel-uuid", "snapshot_id":991,
   "captured_at_ms":1786500000000, "detail_level":"full",
   "system": {
     "host_cpu_percent":92.4, "load1":18.3, "load5":12.0, "load15":8.1,
@@ -269,24 +278,25 @@ footer a {
   "storage":{"used_bytes":31457280,"limit_bytes":52428800,
              "persistence_state":"normal"}
 }</code></pre>
-<h3>6.4 Lifecycle、Snapshot 与排行对象</h3><table><thead><tr><th>对象</th><th>必需字段</th></tr></thead><tbody><tr><td>LifecycleSummary</td><td>host_id、boot_id、started_at_ms、last_seen_at_ms、ended_at_ms?、termination、snapshot_count、detail_start_at_ms?、retention_state</td></tr><tr><td>SnapshotSummary</td><td>id、boot_id、captured_at_ms、scheduled_at_ms、duration_ms、sample_interval_ms?、detail_level、persistence_state</td></tr><tr><td>ProcessSample</td><td>pid、create_time_ms、ppid?、uid、username?、comm、state?、threads?、cpu_percent?、rss_bytes?、swap_bytes?、read_bps?、write_bps?、cmdline_redacted、cmdline_hash、truncated、redaction_status</td></tr><tr><td>ProcessRank</td><td>dimension、rank、value、process；value 与该 dimension 单位一致</td></tr><tr><td>UserSample</td><td>uid、username?、cpu_percent?、rss_bytes、swap_bytes?、read_bps?、write_bps?、process_count、thread_count</td></tr><tr><td>Event</td><td>id、boot_id、snapshot_id?、occurred_at_ms、type、details</td></tr></tbody></table><p>带问号字段允许 null。ProcessSample 的稳定身份是 <code>pid + create_time_ms</code>；username 不参与身份判断。<code>cmdline_redacted</code> 最大 4096 UTF-8 字节，API 不存在获取原始命令的参数或高权限端点。完整 system 字段清单必须由 FastAPI OpenAPI schema 生成并作为实现合同提交。</p>
+<h3>6.4 Lifecycle、Snapshot 与排行对象</h3><table><thead><tr><th>对象</th><th>必需字段</th></tr></thead><tbody><tr><td>LifecycleSummary</td><td>host_id、lifecycle_key、boot_id、container_instance_id?、PID 1 指纹、detection_method、detection_confidence、started_at_ms、last_seen_at_ms、ended_at_ms?、termination、snapshot_count、detail_start_at_ms?、retention_state</td></tr><tr><td>SnapshotSummary</td><td>id、lifecycle_key、boot_id、captured_at_ms、scheduled_at_ms、duration_ms、sample_interval_ms?、detail_level、persistence_state</td></tr><tr><td>ProcessSample</td><td>pid、create_time_ms、ppid?、uid、username?、comm、state?、threads?、cpu_percent?、rss_bytes?、swap_bytes?、read_bps?、write_bps?、cmdline_redacted、cmdline_hash、truncated、redaction_status</td></tr><tr><td>ProcessRank</td><td>dimension、rank、value、process；value 与该 dimension 单位一致</td></tr><tr><td>UserSample</td><td>uid、username?、cpu_percent?、rss_bytes、swap_bytes?、read_bps?、write_bps?、process_count、thread_count</td></tr><tr><td>Event</td><td>id、lifecycle_key、boot_id、snapshot_id?、occurred_at_ms、type、details</td></tr></tbody></table><p>带问号字段允许 null。<code>boot_id</code> 始终表示 kernel boot ID，不能用作容器生命周期唯一键。ProcessSample 的稳定身份是 <code>pid + create_time_ms</code>；username 不参与身份判断。<code>cmdline_redacted</code> 最大 4096 UTF-8 字节，API 不存在获取原始命令的参数或高权限端点。完整 system 字段清单必须由 FastAPI OpenAPI schema 生成并作为实现合同提交。</p>
 <h3>6.5 SeriesResponse 与 CompareResponse</h3><pre><code>SeriesResponse {
-  host_id, boot_id, requested_resolution, actual_resolution,
+  host_id, lifecycle_key, boot_id, requested_resolution, actual_resolution,
   series: [{metric, unit, points: [[timestamp_ms, value_or_null], ...]}]
 }
 CompareResponse {
-  host_id, boot_id, left_snapshot_id, right_snapshot_id,
+  host_id, lifecycle_key, boot_id, left_snapshot_id, right_snapshot_id,
   system_deltas: [{metric, unit, left?, right?, absolute_delta?, percent_delta?}],
   processes: {created:[], exited:[], continued:[], pid_reused:[]},
   users: []
 }</code></pre><p>时间缺口必须包含 null 点或拆分序列，不能由后端插值。基数为 0 或任一侧缺失时 percent_delta 为 null。</p>
-<h3>6.6 错误合同</h3><p>第一版后端固定错误码：<code>INVALID_ARGUMENT</code>、<code>INVALID_CURSOR</code>、<code>NOT_FOUND</code>、<code>DATA_REMOVED</code>、<code>CAPABILITY_UNAVAILABLE</code>、<code>QUERY_TOO_LARGE</code>、<code>BUSY</code>、<code>INTERNAL_ERROR</code>。HTTP 状态码遵循语义；错误 message 用于人类阅读，前端逻辑只依赖 code。Ingress 产生的 401/403/5xx 不保证符合该 JSON 错误结构，前端按网关错误单独处理。</p></section>
+<h3>6.6 错误合同</h3><p>第一版后端固定错误码：<code>INVALID_ARGUMENT</code>、<code>INVALID_CURSOR</code>、<code>NOT_FOUND</code>、<code>AMBIGUOUS_LIFECYCLE</code>、<code>DATA_REMOVED</code>、<code>CAPABILITY_UNAVAILABLE</code>、<code>QUERY_TOO_LARGE</code>、<code>BUSY</code>、<code>INTERNAL_ERROR</code>。HTTP 状态码遵循语义；错误 message 用于人类阅读，前端逻辑只依赖 code。Ingress 产生的 401/403/5xx 不保证符合该 JSON 错误结构，前端按网关错误单独处理。</p></section>
 <section><h2>7. 页面与接口映射</h2><table><thead><tr><th>页面</th><th>最小请求</th></tr></thead><tbody><tr><td>多主机总览</td><td>每个后端并行请求 status + latest；两者可并行，任一成功都展示可用部分。</td></tr><tr><td>主机详情</td><td>status、latest、lifecycles。</td></tr><tr><td>生命周期详情</td><td>lifecycle、series、events；点击快照后请求 processes/users。</td></tr><tr><td>最终证据</td><td>final?count=N；响应内嵌 system、top 和 users。</td></tr><tr><td>快照对比</td><td>compare；不要求前端下载两个完整快照后自行计算。</td></tr></tbody></table></section>
 <section><h2>8. 示例</h2><pre><code>GET /api/v1/lifecycles/8d.../final?count=3
 
 {
   "host_id": "bfe1...",
-  "boot_id": "8d...",
+  "lifecycle_key": "instance:8d...",
+  "boot_id": "kernel-8d...",
   "termination": "unclean_or_unknown",
   "last_persisted_at_ms": 1786500000000,
   "evidence_gap_ms": null,

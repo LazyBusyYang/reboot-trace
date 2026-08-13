@@ -1,23 +1,7 @@
+# The collector must run as a native process inside each target container.
+# Compose cannot attach this image to a sibling Kubernetes container's PID and
+# writable-layer lifecycle. This file therefore deploys only the shared UI.
 services:
-  backend:
-    build:
-      context: ..
-      dockerfile: backend/Dockerfile
-    pid: host
-    cap_drop: [ALL]
-    cap_add: [SYS_PTRACE, DAC_READ_SEARCH]
-    restart: unless-stopped
-    read_only: true
-    tmpfs: [/tmp]
-    environment:
-      RT_PROC_ROOT: /host/proc
-      RT_HOST_PASSWD: /host/etc/passwd
-      RT_STORAGE_LIMIT_MIB: "50"
-      RT_CORS_ORIGINS: https://reboot-trace.example
-    volumes:
-      - reboot-trace-data:/var/lib/reboot-trace
-      - /proc:/host/proc:ro
-      - /etc/passwd:/host/etc/passwd:ro
   frontend:
     build:
       context: ..
@@ -27,5 +11,3 @@ services:
     ports: ["8088:8080"]
     volumes:
       - ./runtime-config.example.json:/usr/share/nginx/html/config/runtime-config.json:ro
-volumes:
-  reboot-trace-data: {}
