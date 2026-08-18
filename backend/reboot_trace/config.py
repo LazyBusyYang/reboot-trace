@@ -56,6 +56,7 @@ class Settings:
     require_container_marker: bool = False
     service_token: str | None = None
     project_dir: Path | None = None
+    segment_target_bytes: int | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -84,11 +85,21 @@ class Settings:
             parsed = urlsplit(origin)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
                 raise ValueError(f"RT_CORS_ORIGINS contains an invalid exact origin: {origin}")
+        storage_limit_bytes = _int("RT_STORAGE_LIMIT_MIB", 50) * 1024 * 1024
+        configured_segment_mib = os.getenv("RT_SEGMENT_TARGET_MIB")
+        segment_target_bytes = (
+            _int("RT_SEGMENT_TARGET_MIB", 12) * 1024 * 1024
+            if configured_segment_mib is not None else None
+        )
+        reserve = 2 * 1024 * 1024
+        maximum_segment = max(1024 * 1024, (storage_limit_bytes - reserve) // 3)
+        if segment_target_bytes is not None and segment_target_bytes > maximum_segment:
+            raise ValueError("RT_SEGMENT_TARGET_MIB must leave room for two rotation copies and 2 MiB reserve")
         return cls(
             data_dir=data_dir,
             proc_root=Path(os.getenv("RT_PROC_ROOT", "/proc")),
             host_passwd=Path(passwd) if passwd else None,
-            storage_limit_bytes=_int("RT_STORAGE_LIMIT_MIB", 50) * 1024 * 1024,
+            storage_limit_bytes=storage_limit_bytes,
             sample_interval_ms=_int("RT_SAMPLE_INTERVAL_SECONDS", 5) * 1000,
             process_top_n=_int("RT_PROCESS_TOP_N", 50, maximum=500),
             cmdline_max_bytes=max_cmd,
@@ -99,4 +110,11 @@ class Settings:
             require_container_marker=_bool("RT_REQUIRE_CONTAINER_MARKER"),
             service_token=service_token,
             project_dir=project_dir,
+            segment_target_bytes=segment_target_bytes,
         )
+
+    def effective_segment_target_bytes(self) -> int:
+        if self.segment_target_bytes is not None:
+            return self.segment_target_bytes
+        available = max(1024 * 1024, self.storage_limit_bytes - 2 * 1024 * 1024)
+        return max(1024 * 1024, min(12 * 1024 * 1024, available // 3))

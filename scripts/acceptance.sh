@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 skip_docker=false
 if [[ "${1:-}" == "--skip-docker" ]]; then skip_docker=true; shift; fi

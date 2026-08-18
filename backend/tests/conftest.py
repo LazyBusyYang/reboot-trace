@@ -14,6 +14,7 @@ def settings(tmp_path: Path) -> Settings:
     (proc / "sys/kernel/random").mkdir(parents=True)
     (proc / "pressure").mkdir()
     sys.mkdir(); data.mkdir()
+    data.chmod(0o700)
     (proc / "sys/kernel/random/boot_id").write_text("11111111-1111-1111-1111-111111111111\n")
     (proc / "uptime").write_text("100.00 10.00\n")
     (proc / "stat").write_text("cpu  100 0 20 800 0 0 0 0 0 0\n")

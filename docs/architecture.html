@@ -230,9 +230,9 @@ footer a {
 <tr><td>Lifecycle Manager</td><td>联合实例 UUID、PID 1 指纹和数据库历史恢复或建立容器生命周期；kernel boot ID 只作辅助证据，采集器启停只记录 service event。</td></tr>
 <tr><td>Collector</td><td>固定调度采样主机和进程，保存上次计数器以计算 CPU/I/O 差值。</td></tr>
 <tr><td>Snapshot Assembler</td><td>合并系统、进程 Top-N、用户汇总和事件，形成完整快照。</td></tr>
-<tr><td>SQLite Repository</td><td>单事务写入、查询、降采样、空间核算和清理。</td></tr>
+<tr><td>SQLite Repository</td><td>串行协调活动库写入、跨分段查询、活动库轮转、空间核算和整段清理。</td></tr>
 <tr><td>FastAPI</td><td>提供健康、能力、生命周期、快照、排行、用户和对比接口。</td></tr>
-<tr><td>Retention Manager</td><td>按软/硬阈值治理 DB、WAL、SHM 总空间并记录丢弃统计。</td></tr>
+<tr><td>Retention Manager</td><td>按软/硬阈值治理活动库、历史分段、manifest 和 quarantine 总空间并记录丢弃统计。</td></tr>
 </tbody></table><p>采集任务、保留任务和 HTTP 服务逻辑分离。API 读取 SQLite 或最新内存快照，绝不因一次前端刷新触发全量进程扫描。</p></section>
 <section><h2>3. 多后端前端模型</h2><p>前端容器启动时加载 <code>/config/runtime-config.json</code>，示例：</p><pre><code>{
   "backends": [

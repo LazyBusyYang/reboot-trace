@@ -157,6 +157,7 @@ def test_marker_parent_symlink_to_persistent_mount_is_rejected(settings,monkeypa
 def test_marker_file_symlink_is_not_followed(settings,monkeypatch):
     parent=settings.instance_marker_path.parent
     parent.mkdir(parents=True,exist_ok=True)
+    parent.chmod(0o700)
     target=settings.data_dir/"persisted-marker"
     target.write_text(str(uuid.uuid4())+"\n")
     try:
