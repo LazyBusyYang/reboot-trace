@@ -13,6 +13,17 @@ RT_PROJECT_DIR="$PWD" RT_PROC_ROOT=/proc RT_HOST_PASSWD=/etc/passwd RT_CORS_ORIG
 
 后端必须作为普通进程直接运行在目标容器内，使用本地 `/proc` 和目标容器根 overlay 中的实例 marker。标准部署默认使用 `/run/reboot-trace/container-instance-id`；无法由 root 准备目录的 dev1/4/5/9 使用 `scripts/instances/`，由普通用户在 `/tmp/reboot-trace-${UID}` 创建私有 marker。数据默认建议放在 `<项目根>/var/reboot-trace`；Git 项目目录本身不要求持久，但运维人员必须在启动前确认这个实际数据路径位于适合 SQLite 且能跨目标容器重建保留的挂载，否则应显式设置 `RT_DATA_DIR`。程序会拒绝明显位于根 overlay 或与 marker 同挂载的配置，但不会代替真实重建验收。
 
+后端使用分段 SQLite：`reboot-trace.sqlite3` 是 DELETE journal 模式的活动库，`segments/` 保存不可变历史段，`segments.json` 是可由数据库内 generation 元数据重建的清单。默认活动段目标为 12 MiB，可用 `RT_SEGMENT_TARGET_MIB` 调整；该值必须为封存副本、新活动库和 2 MiB 余量留出空间，总预算仍由 `RT_STORAGE_LIMIT_MIB` 控制。运行期间不使用 WAL、incremental vacuum 或原地压缩。
+
+现有 schema v3 单库不会在启动时静默转换。停服并把备份目录放在 `RT_DATA_DIR` 之外后，先预检再迁移：
+
+```bash
+PYTHONPATH=backend python3 -m reboot_trace.storage_migrate --data-dir "$RT_DATA_DIR" --backup-dir /path/outside-data --dry-run
+PYTHONPATH=backend python3 -m reboot_trace.storage_migrate --data-dir "$RT_DATA_DIR" --backup-dir /path/outside-data
+```
+
+迁移会执行完整性和外键检查、生成带 SHA-256 的备份，并在安装阶段保持独占锁。安装使用 `.segment-migration.json` 记录可恢复阶段，活动库最后替换；中断后使用相同命令和备份根目录即可幂等续跑。损坏、占用或空间不足时不会开始安装。
+
 ## 前端开发
 
 ```bash

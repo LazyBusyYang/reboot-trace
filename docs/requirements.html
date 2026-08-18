@@ -240,9 +240,9 @@ footer a {
 <li>支持主机概览、生命周期列表、生命周期趋势、最终快照和双快照对比。</li>
 </ul></section>
 <section><h2>3. 非功能需求</h2><table><thead><tr><th>方面</th><th>要求</th></tr></thead><tbody>
-<tr><td>磁盘</td><td>默认受管文件预算 50 MiB，可配置；预算覆盖 DB、WAL、SHM 与同目录临时文件。软阈值触发清理，写入前预留安全空间，无法安全提交时暂停明细持久化。</td></tr>
+<tr><td>磁盘</td><td>默认受管文件预算 50 MiB，可配置；预算覆盖活动库、DELETE journal、历史分段、manifest、quarantine 与同目录临时文件。软阈值触发整段清理，写入前预留安全空间，无法安全提交时暂停明细持久化。</td></tr>
 <tr><td>开销</td><td>采集器必须缓存静态信息、限制命令长度并避免自身成为资源故障诱因。</td></tr>
-<tr><td>一致性</td><td>SQLite 事务、WAL checkpoint 和合理同步等级；明确最后成功落盘时间。</td></tr>
+<tr><td>一致性</td><td>SQLite 单写事务、DELETE journal、FULL synchronous、分段封存前后完整性检查；明确最后成功落盘时间。</td></tr>
 <tr><td>安全</td><td>原始命令行不落盘；仅保存脱敏后最多 4096 字节。后端第一版不提供登录鉴权，由各主机 Ingress 提供 TLS，并通过网络可达性和精确 CORS Origin 限制访问。</td></tr>
 <tr><td>兼容</td><td>目标为使用 procfs 的 Linux；缺少 PSI、Swap 或 I/O 字段时返回 capability 信息而非失败。</td></tr>
 </tbody></table></section>
