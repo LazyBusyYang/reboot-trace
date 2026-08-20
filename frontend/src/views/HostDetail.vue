@@ -14,6 +14,8 @@ const nextCursor = ref<string>()
 let controller: AbortController | undefined
 const backend = computed(() => store.backendById(String(route.params.backendId)))
 const host = computed(() => store.hostById(String(route.params.backendId)))
+const lifecycleRef=(item:Lifecycle)=>encodeURIComponent(item.lifecycle_key||item.boot_id)
+const hasFinalEvidence=(item:Lifecycle)=>item.termination!=='active'&&['final_complete','final_partial'].includes(item.retention_state)
 
 async function loadPage(reset = false) {
   const value = backend.value
@@ -57,7 +59,7 @@ onBeforeUnmount(() => controller?.abort())
     <details v-if="host?.status?.capabilities"><summary>采集能力</summary><ul><li v-for="(capability, name) in host.status.capabilities" :key="name">{{ name }}：{{ capability.state }}{{ capability.reason ? `（${capability.reason}）` : '' }}</li></ul></details>
     <h2>生命周期记录</h2>
     <div v-if="loading && !items.length" class="skeleton" aria-label="正在加载"></div>
-    <table v-else><thead><tr><th>容器实例</th><th>Kernel boot</th><th>判定</th><th>启动</th><th>最后观察</th><th>状态</th><th>完整度</th><th>快照</th><th></th></tr></thead><tbody><tr v-for="item in items" :key="item.lifecycle_key || item.boot_id"><td><code :title="item.lifecycle_key || item.boot_id">{{ (item.lifecycle_key || item.boot_id).slice(0, 8) }}</code></td><td><code :title="item.boot_id">{{ item.boot_id.slice(0, 8) }}</code></td><td>{{ item.detection_method || '旧版 boot_id' }} / {{ item.detection_confidence || 'unknown' }}</td><td>{{ fmtTime(item.started_at_ms) }}</td><td>{{ fmtTime(item.last_seen_at_ms) }}</td><td><span class="badge">{{ terminationLabel(item.termination) }}</span></td><td>{{ item.retention_state }}</td><td>{{ item.snapshot_count }}</td><td><router-link :to="`/hosts/${route.params.backendId}/lifecycles/${encodeURIComponent(item.lifecycle_key || item.boot_id)}`">分析</router-link></td></tr></tbody></table>
+    <div v-else class="table-scroll"><table><thead><tr><th>容器实例</th><th>Kernel boot</th><th>判定</th><th>启动</th><th>最后观察</th><th>状态</th><th>最终证据</th><th>快照</th><th></th></tr></thead><tbody><tr v-for="item in items" :key="item.lifecycle_key || item.boot_id"><td><code :title="item.lifecycle_key || item.boot_id">{{ (item.lifecycle_key || item.boot_id).slice(0, 8) }}</code></td><td><code :title="item.boot_id">{{ item.boot_id.slice(0, 8) }}</code></td><td>{{ item.detection_method || '旧版 boot_id' }} / {{ item.detection_confidence || 'unknown' }}</td><td>{{ fmtTime(item.started_at_ms) }}</td><td>{{ fmtTime(item.last_seen_at_ms) }}</td><td><span class="badge">{{ terminationLabel(item.termination) }}</span></td><td><router-link v-if="hasFinalEvidence(item)" :to="`/hosts/${route.params.backendId}/lifecycles/${lifecycleRef(item)}/final`">{{ item.retention_state }}</router-link><span v-else>{{ item.retention_state }}</span></td><td>{{ item.snapshot_count }}</td><td class="actions"><router-link :to="`/hosts/${route.params.backendId}/lifecycles/${lifecycleRef(item)}`">分析</router-link><router-link v-if="hasFinalEvidence(item)" :to="`/hosts/${route.params.backendId}/lifecycles/${lifecycleRef(item)}/final`">最终证据</router-link></td></tr></tbody></table></div>
     <button v-if="nextCursor" :disabled="loading" @click="loadPage(false)">{{ loading ? '加载中…' : '加载更多生命周期' }}</button>
     <p v-if="!loading && !items.length" class="card muted">该主机暂无生命周期记录。</p>
   </section>

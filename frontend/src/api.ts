@@ -6,10 +6,15 @@ export class ApiError extends Error {
     public readonly kind: 'timeout' | 'network' | 'forbidden' | 'incompatible' | 'backend',
     public readonly status?: number,
     public readonly code?: string,
+    public readonly requestId?: string,
   ) {
     super(message)
   }
 }
+
+export interface RequestMeta { requestId:string;completedAt:number }
+const requestMetadata=new WeakMap<object,RequestMeta>()
+export const requestMeta=(value:unknown):RequestMeta|undefined=>value && typeof value==='object' ? requestMetadata.get(value as object) : undefined
 
 export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
   const response = await fetch('/config/runtime-config.json', { cache: 'no-store', credentials: 'omit' })
@@ -42,10 +47,11 @@ export async function api<T>(backend: BackendConfig, path: string, timeout = 800
   const timer = window.setTimeout(() => { timedOut = true; controller.abort() }, timeout)
   const cancel = () => controller.abort()
   externalSignal?.addEventListener('abort', cancel, { once: true })
+  const clientRequestId=crypto.randomUUID()
   try {
     const response = await fetch(`${backend.baseUrl}${path}`, {
       credentials: 'omit',
-      headers: { Accept: 'application/json', 'X-Request-ID': crypto.randomUUID() },
+      headers: { Accept: 'application/json', 'X-Request-ID': clientRequestId },
       signal: controller.signal,
     })
     if (!response.ok) {
@@ -57,7 +63,7 @@ export async function api<T>(backend: BackendConfig, path: string, timeout = 800
         message = error.message || code || message
       } catch { /* Ingress may return HTML. */ }
       const kind = classifyStatus(response.status)
-      throw new ApiError(message, kind, response.status, code)
+      throw new ApiError(message, kind, response.status, code, response.headers?.get?.('x-request-id') || clientRequestId)
     }
     const value = await response.json()
     if (value.api_version && value.api_version !== '1') {
@@ -66,14 +72,15 @@ export async function api<T>(backend: BackendConfig, path: string, timeout = 800
     if (typeof value.schema_version === 'number' && (value.schema_version < 1 || value.schema_version > 3)) {
       throw new ApiError(`数据结构版本不兼容: ${value.schema_version}（前端支持 1–3）`, 'incompatible', undefined, 'VERSION_UNSUPPORTED')
     }
+    if(value && typeof value==='object') requestMetadata.set(value,{requestId:response.headers?.get?.('x-request-id') || clientRequestId,completedAt:Date.now()})
     return value as T
   } catch (error) {
     if (error instanceof ApiError) throw error
     if ((error as Error).name === 'AbortError') {
       if (!timedOut && externalSignal?.aborted) throw error
-      throw new ApiError(`请求超时 (${timeout} ms)`, 'timeout')
+      throw new ApiError(`请求超时 (${timeout} ms)`, 'timeout',undefined,undefined,clientRequestId)
     }
-    throw new ApiError((error as Error).message || '网络请求失败', 'network')
+    throw new ApiError((error as Error).message || '网络请求失败', 'network',undefined,undefined,clientRequestId)
   } finally {
     clearTimeout(timer)
     externalSignal?.removeEventListener('abort', cancel)
