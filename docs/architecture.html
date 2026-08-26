@@ -230,9 +230,9 @@ footer a {
 <tr><td>Lifecycle Manager</td><td>联合实例 UUID、PID 1 指纹和数据库历史恢复或建立容器生命周期；kernel boot ID 只作辅助证据，采集器启停只记录 service event。</td></tr>
 <tr><td>Collector</td><td>固定调度采样主机和进程，保存上次计数器以计算 CPU/I/O 差值。</td></tr>
 <tr><td>Snapshot Assembler</td><td>合并系统、进程 Top-N、用户汇总和事件，形成完整快照。</td></tr>
-<tr><td>SQLite Repository</td><td>串行协调活动库写入、跨分段查询、活动库轮转、空间核算和整段清理。</td></tr>
+<tr><td>SQLite Repository</td><td>串行协调活动滚动库写入、单生命周期胶囊查询、生命周期封存、空间核算和整胶囊清理。</td></tr>
 <tr><td>FastAPI</td><td>提供健康、能力、生命周期、快照、排行、用户和对比接口。</td></tr>
-<tr><td>Retention Manager</td><td>按软/硬阈值治理活动库、历史分段、manifest 和 quarantine 总空间并记录丢弃统计。</td></tr>
+<tr><td>Retention Manager</td><td>执行每生命周期 12 个完整快照与 12 个趋势桶上限，并按软/硬阈值治理活动库、证据胶囊、manifest 和 quarantine 总空间。</td></tr>
 </tbody></table><p>采集任务、保留任务和 HTTP 服务逻辑分离。API 读取 SQLite 或最新内存快照，绝不因一次前端刷新触发全量进程扫描。</p></section>
 <section><h2>3. 多后端前端模型</h2><p>前端容器启动时加载 <code>/config/runtime-config.json</code>，示例：</p><pre><code>{
   "backends": [
@@ -243,7 +243,7 @@ footer a {
   "refreshIntervalMs": 5000
 }</code></pre>
 <ul><li><code>id</code> 在前端配置内唯一且稳定，不使用数组位置作为身份。</li><li><code>baseUrl</code> 指向每台主机后端的 HTTPS Ingress；浏览器直接跨域请求，不经过前端代理。</li><li>启动后并行请求各后端 <code>/status</code> 与 <code>/latest</code>，以服务端返回的 <code>host_id</code> 校验配置并取得总览指标。</li><li>请求使用 <code>Promise.allSettled</code> 类型语义，分别呈现成功、超时、Ingress 拒绝和网络失败。</li><li>跨主机时间轴以 UTC 时间戳传输，浏览器使用 status.server_time_ms 与往返时间估算节点时钟偏差，再按用户时区显示。</li><li>第一版后端无应用层登录鉴权，不传 Authorization 和 Cookie；Ingress 负责 TLS，网络策略/私网可达性限制访问范围，后端 CORS 只允许明确配置的前端 Origin。</li></ul></section>
-<section><h2>4. 关键时序</h2><h3>正常采样</h3><ol><li>调度器记录预期触发时间和实际开始时间，并复核 PID 1 指纹。</li><li>并行读取系统指标与进程表，并以先前计数器计算速率。</li><li>建立各维度 Top-N 与用户汇总。</li><li>使用一个 SQLite 事务写入 snapshot 及全部子记录。</li><li>提交成功后更新内存“最后持久化快照”；失败则记录错误并保持旧值。</li></ol>
-<h3>服务启动与新生命周期</h3><ol><li>验证后端与目标 PID 1 的 PID/mount namespace 同源，读取根 overlay marker、PID 1 指纹和 kernel boot ID。</li><li>marker 与 PID 1 指纹均未变化时恢复原 lifecycle_key，仅记录 <code>collector_started</code> 或采集空窗。</li><li>marker 与 PID 1 指纹同时变化时以 confirmed 创建新生命周期；仅任一信号变化时以 probable 创建并记录 marker 变化或身份冲突。</li><li>仅 kernel boot ID 变化或仅网络断联不创建新生命周期。未观察到可信正常退出证据时使用 <code>unclean_or_unknown</code>，并保护 final 证据窗口。</li></ol></section>
+<section><h2>4. 关键时序</h2><h3>正常采样</h3><ol><li>调度器记录预期触发时间和实际开始时间，并复核 PID 1 指纹。</li><li>并行读取系统指标与进程表，并以先前计数器计算速率。</li><li>建立各维度 Top-N 与用户汇总。</li><li>使用一个 SQLite 事务写入 snapshot 及全部子记录，并滚动选择最新 12 个完整快照和最近一小时的 12 个趋势桶。</li><li>提交成功后更新内存“最后持久化快照”；失败则记录错误并保持旧值。</li></ol>
+<h3>服务启动与新生命周期</h3><ol><li>验证后端与目标 PID 1 的 PID/mount namespace 同源，读取根 overlay marker、PID 1 指纹和 kernel boot ID。</li><li>marker 与 PID 1 指纹均未变化时恢复原 lifecycle_key，仅记录 <code>collector_started</code> 或采集空窗。</li><li>marker 与 PID 1 指纹同时变化时以 confirmed 创建新生命周期；仅任一信号变化时以 probable 创建并记录 marker 变化或身份冲突。</li><li>旧生命周期先在活动库内结束，再创建并校验不可变证据胶囊；胶囊原子安装成功后才清理活动库详情。中断重启时根据胶囊元数据和活动库唯一副本幂等恢复。</li><li>仅 kernel boot ID 变化或仅网络断联不创建新生命周期。未观察到可信正常退出证据时使用 <code>unclean_or_unknown</code>。</li></ol></section>
 <section class="warning"><h2>5. 故障边界</h2><ul><li>硬断电只能保住最近一次成功提交，无法捕获断电瞬间。</li><li>后端必须作为普通进程运行在目标容器内；兄弟容器、host PID 或宿主 procfs 不属于支持的身份拓扑。</li><li>无应用层鉴权意味着任何能访问 Ingress 的客户端都能读取脱敏取证数据；Ingress 必须位于受控网络并使用 TLS。</li><li>50 MiB 是预算而非固定保存时长，保存时长取决于进程数量、采样周期、Top N 与命令长度。</li></ul></section>
 </main><footer><a href="database.html">下一篇：数据库设计 →</a></footer></body></html>

@@ -10,3 +10,4 @@ frontend/*.tsbuildinfo
 *.sqlite3-shm
 /var/reboot-trace/
 runtime/
+.agent/

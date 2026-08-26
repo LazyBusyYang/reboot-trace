@@ -135,9 +135,12 @@ def test_new_boot_closes_old_and_snapshot_is_atomic(settings):
     snapshot_id=r.write_snapshot(sample("boot-a")); assert snapshot_id
     r.start_lifecycle("boot-b",2)
     assert r.db.execute("select termination from lifecycle where id=?",(old,)).fetchone()[0] == "unclean_or_unknown"
-    assert r.db.execute("select count(*) from process_rank where snapshot_id=?",(snapshot_id,)).fetchone()[0] == 1
-    final=r.db.execute("select detail_level from snapshot where id=?",(snapshot_id,)).fetchone()[0]
-    assert final == "final"
+    assert r.db.execute("select count(*) from snapshot where lifecycle_id=?",(old,)).fetchone()[0] == 0
+    connection=r.read_connection(lifecycle_ref="boot-a")
+    try:
+        assert connection.execute("select count(*) from process_rank where snapshot_id=?",(snapshot_id,)).fetchone()[0] == 1
+        assert connection.execute("select detail_level from snapshot where id=?",(snapshot_id,)).fetchone()[0] == "final"
+    finally: connection.close()
     r.close()
 
 
@@ -211,7 +214,7 @@ def test_system_only_degradation_is_persisted_and_queryable(settings):
     row=r.db.execute("select detail_level,persistence_state from snapshot where id=?",(snapshot_id,)).fetchone()
     assert tuple(row)==("summary_only","system_only")
     assert r.db.execute("select count(*) from process_sample where snapshot_id=?",(snapshot_id,)).fetchone()[0] == 0
-    assert r.db.execute("select count(*) from user_sample where snapshot_id=?",(snapshot_id,)).fetchone()[0] == 1
+    assert r.db.execute("select count(*) from user_sample where snapshot_id=?",(snapshot_id,)).fetchone()[0] == 0
     r.close()
 
 

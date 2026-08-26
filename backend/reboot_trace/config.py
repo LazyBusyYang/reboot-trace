@@ -56,7 +56,9 @@ class Settings:
     require_container_marker: bool = False
     service_token: str | None = None
     project_dir: Path | None = None
-    segment_target_bytes: int | None = None
+    final_snapshots_per_lifecycle: int = 12
+    trend_snapshots_per_lifecycle: int = 12
+    trend_interval_ms: int = 300_000
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -86,21 +88,18 @@ class Settings:
             if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
                 raise ValueError(f"RT_CORS_ORIGINS contains an invalid exact origin: {origin}")
         storage_limit_bytes = _int("RT_STORAGE_LIMIT_MIB", 50) * 1024 * 1024
-        configured_segment_mib = os.getenv("RT_SEGMENT_TARGET_MIB")
-        segment_target_bytes = (
-            _int("RT_SEGMENT_TARGET_MIB", 12) * 1024 * 1024
-            if configured_segment_mib is not None else None
-        )
-        reserve = 2 * 1024 * 1024
-        maximum_segment = max(1024 * 1024, (storage_limit_bytes - reserve) // 3)
-        if segment_target_bytes is not None and segment_target_bytes > maximum_segment:
-            raise ValueError("RT_SEGMENT_TARGET_MIB must leave room for two rotation copies and 2 MiB reserve")
+        sample_interval_ms = _int("RT_SAMPLE_INTERVAL_SECONDS", 5) * 1000
+        final_snapshots = _int("RT_FINAL_SNAPSHOTS_PER_LIFECYCLE", 12, maximum=1000)
+        trend_snapshots = _int("RT_TREND_SNAPSHOTS_PER_LIFECYCLE", 12, minimum=0, maximum=1000)
+        trend_interval_ms = _int("RT_TREND_INTERVAL_SECONDS", 300) * 1000
+        if trend_snapshots and trend_interval_ms < sample_interval_ms:
+            raise ValueError("RT_TREND_INTERVAL_SECONDS must be >= RT_SAMPLE_INTERVAL_SECONDS")
         return cls(
             data_dir=data_dir,
             proc_root=Path(os.getenv("RT_PROC_ROOT", "/proc")),
             host_passwd=Path(passwd) if passwd else None,
             storage_limit_bytes=storage_limit_bytes,
-            sample_interval_ms=_int("RT_SAMPLE_INTERVAL_SECONDS", 5) * 1000,
+            sample_interval_ms=sample_interval_ms,
             process_top_n=_int("RT_PROCESS_TOP_N", 50, maximum=500),
             cmdline_max_bytes=max_cmd,
             cors_origins=origins,
@@ -110,11 +109,7 @@ class Settings:
             require_container_marker=_bool("RT_REQUIRE_CONTAINER_MARKER"),
             service_token=service_token,
             project_dir=project_dir,
-            segment_target_bytes=segment_target_bytes,
+            final_snapshots_per_lifecycle=final_snapshots,
+            trend_snapshots_per_lifecycle=trend_snapshots,
+            trend_interval_ms=trend_interval_ms,
         )
-
-    def effective_segment_target_bytes(self) -> int:
-        if self.segment_target_bytes is not None:
-            return self.segment_target_bytes
-        available = max(1024 * 1024, self.storage_limit_bytes - 2 * 1024 * 1024)
-        return max(1024 * 1024, min(12 * 1024 * 1024, available // 3))

@@ -14,7 +14,7 @@ from typing import Any
 from .config import Settings
 from .identity import MountIdentity, _mount_identity
 from .models import SnapshotData
-from .segment_store import INTERNAL_SCHEMA, SegmentStore, copy_events, copy_rows, database_ok
+from .segment_store import FORMAT_VERSION, INTERNAL_SCHEMA, SegmentStore, _fsync_directory, copy_events, copy_rows, database_ok
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS host(id TEXT PRIMARY KEY, hostname TEXT NOT NULL, created_at_ms INTEGER NOT NULL);
@@ -59,8 +59,6 @@ CREATE INDEX IF NOT EXISTS idx_session_time ON service_session(lifecycle_id,star
 """
 
 SCHEMA_VERSION = 3
-FINAL_WINDOW_MS = 10 * 60 * 1000
-MIN_FINAL_SNAPSHOTS = 12
 
 
 def _details_json(details: dict[str, Any] | None) -> str:
@@ -103,7 +101,6 @@ class Repository:
         self.segment_store = SegmentStore(
             settings.data_dir,
             settings.storage_limit_bytes,
-            settings.effective_segment_target_bytes(),
         )
         self.segment_store.require_migrated_or_empty()
         new = not self.path.exists()
@@ -152,7 +149,6 @@ class Repository:
             self.db.close()
             raise RuntimeError(f"database integrity check failed: {reason}")
         self.segment_store.initialize_active(self.db)
-        self.segment_store.prune()
         self.host_id = settings.host_id_override or self._load_or_create_host_id()
         now = int(time.time() * 1000)
         self.db.execute("INSERT OR IGNORE INTO host VALUES(?,?,?)", (self.host_id, hostname, now))
@@ -165,9 +161,13 @@ class Repository:
         self.persistence_state = "paused" if self.managed_bytes() >= settings.storage_limit_bytes - 2 * 1024 * 1024 else "normal"
         self.max_transaction_bytes = 0
         self.reclaim_requested = False
+        self._recover_evidence_state()
 
     def _migration_checkpoint(self, stage: str) -> None:
         """Test hook for proving that schema replacement is failure atomic."""
+
+    def _evidence_checkpoint(self, stage: str) -> None:
+        """Test hook for simulating a process loss during capsule sealing."""
 
     def _migrate_schema_v3(self, snapshot_needs_v2: bool, lifecycle_needs_v3: bool, event_needs_v3: bool) -> None:
         self.db.commit()
@@ -269,9 +269,30 @@ class Repository:
         )
         return event_id
 
-    def read_connection(self, timeout_seconds: float = 10.0) -> sqlite3.Connection:
+    def read_connection(self, timeout_seconds: float = 10.0, lifecycle_ref: str | None = None) -> sqlite3.Connection:
         with self.lock:
-            return self.segment_store.read_connection(timeout_seconds)
+            evidence_path: Path | None = None
+            if lifecycle_ref:
+                row = self.db.execute(
+                    "SELECT id,termination FROM lifecycle WHERE host_id=? AND lifecycle_key=?", (self.host_id, lifecycle_ref)
+                ).fetchone()
+                if row is None:
+                    matches = self.db.execute(
+                        "SELECT id,termination FROM lifecycle WHERE host_id=? AND boot_id=? ORDER BY id DESC LIMIT 2",
+                        (self.host_id, lifecycle_ref),
+                    ).fetchall()
+                    if len(matches) == 1:
+                        row = matches[0]
+                if row is not None:
+                    evidence_path = self.segment_store.evidence_for(int(row[0]))
+                    if row["termination"] != "active" and evidence_path is None:
+                        active_count = int(self.db.execute(
+                            "SELECT count(*) FROM snapshot WHERE lifecycle_id=?", (int(row[0]),)
+                        ).fetchone()[0])
+                        if active_count == 0:
+                            with self.db:
+                                self._mark_capsule_removed(int(row[0]))
+            return self.segment_store.read_connection(timeout_seconds, evidence_path)
 
     @staticmethod
     def _estimated_snapshot_bytes(data: SnapshotData, rank_limit: int | None) -> int:
@@ -308,24 +329,222 @@ class Repository:
         return all(value is not None for value in values) and all(value is not None for value in stored) and values != stored
 
     def _finalize_lifecycle(self, lifecycle_id: int) -> None:
-        row = self.db.execute("SELECT last_seen_at_ms FROM lifecycle WHERE id=?", (lifecycle_id,)).fetchone()
+        self._prune_lifecycle_snapshots(lifecycle_id)
+        self.db.execute(
+            "UPDATE snapshot SET detail_level='final' WHERE lifecycle_id=? AND detail_level!='summary_only'",
+            (lifecycle_id,),
+        )
+        self.db.execute(
+            "UPDATE lifecycle SET termination='unclean_or_unknown',ended_at_ms=last_seen_at_ms WHERE id=?",
+            (lifecycle_id,),
+        )
+        self._update_lifecycle_summary(lifecycle_id)
+
+    def _snapshot_counts(self, connection: sqlite3.Connection, lifecycle_id: int) -> tuple[int, int]:
+        full = int(connection.execute(
+            "SELECT count(*) FROM snapshot WHERE lifecycle_id=? AND detail_level!='summary_only'",
+            (lifecycle_id,),
+        ).fetchone()[0])
+        trend = int(connection.execute(
+            "SELECT count(*) FROM snapshot WHERE lifecycle_id=? AND detail_level='summary_only'",
+            (lifecycle_id,),
+        ).fetchone()[0])
+        return full, trend
+
+    def _update_lifecycle_summary(self, lifecycle_id: int, *, force_summary_only: bool = False) -> None:
+        row = self.db.execute("SELECT summary_json,termination FROM lifecycle WHERE id=?", (lifecycle_id,)).fetchone()
         if not row:
             return
-        cutoff = int(row["last_seen_at_ms"]) - FINAL_WINDOW_MS
-        self.db.execute("""
-            UPDATE snapshot SET detail_level='final'
-            WHERE lifecycle_id=? AND persistence_state='normal' AND detail_level='full' AND captured_at_ms>=?
-        """, (lifecycle_id, cutoff))
-        self.db.execute("""
-            UPDATE snapshot SET detail_level='final'
-            WHERE id IN (
-              SELECT id FROM snapshot WHERE lifecycle_id=? AND persistence_state='normal' AND detail_level='full'
-              ORDER BY captured_at_ms DESC LIMIT ?
+        summary = json.loads(row["summary_json"] or "{}")
+        full, trend = (0, 0) if force_summary_only else self._snapshot_counts(self.db, lifecycle_id)
+        if row["termination"] == "active":
+            state = "complete"
+        elif full >= self.settings.final_snapshots_per_lifecycle:
+            state = "final_complete"
+        elif full >= 2:
+            state = "final_partial"
+        elif full == 1:
+            state = "final_minimum"
+        else:
+            state = "summary_only"
+        summary.update(retention_state=state, full_snapshot_count=full, trend_snapshot_count=trend)
+        self.db.execute(
+            "UPDATE lifecycle SET summary_json=? WHERE id=?",
+            (json.dumps(summary, separators=(",", ":")), lifecycle_id),
+        )
+
+    def _prune_lifecycle_snapshots(self, lifecycle_id: int) -> None:
+        rows = self.db.execute(
+            "SELECT id,captured_at_ms,detail_level FROM snapshot WHERE lifecycle_id=? ORDER BY captured_at_ms DESC,id DESC",
+            (lifecycle_id,),
+        ).fetchall()
+        dense = [int(row["id"]) for row in rows if row["detail_level"] != "summary_only"][:self.settings.final_snapshots_per_lifecycle]
+        dense_set = set(dense)
+        buckets: dict[int, int] = {}
+        newest_ms = int(rows[0]["captured_at_ms"]) if rows else 0
+        trend_cutoff_ms = newest_ms - self.settings.trend_snapshots_per_lifecycle * self.settings.trend_interval_ms
+        for row in rows:
+            snapshot_id = int(row["id"])
+            if snapshot_id in dense_set:
+                continue
+            if self.settings.trend_snapshots_per_lifecycle == 0 or int(row["captured_at_ms"]) < trend_cutoff_ms:
+                continue
+            bucket = int(row["captured_at_ms"]) // self.settings.trend_interval_ms
+            buckets.setdefault(bucket, snapshot_id)
+        trend = list(buckets.values())[:self.settings.trend_snapshots_per_lifecycle]
+        keep = dense_set | set(trend)
+        if trend:
+            placeholders = ",".join("?" for _ in trend)
+            self.db.execute(f"DELETE FROM process_rank WHERE snapshot_id IN ({placeholders})", trend)
+            self.db.execute(f"DELETE FROM process_sample WHERE snapshot_id IN ({placeholders})", trend)
+            self.db.execute(f"DELETE FROM user_sample WHERE snapshot_id IN ({placeholders})", trend)
+            self.db.execute(f"UPDATE snapshot SET detail_level='summary_only',persistence_state='system_only' WHERE id IN ({placeholders})", trend)
+        remove = [int(row["id"]) for row in rows if int(row["id"]) not in keep]
+        if remove:
+            placeholders = ",".join("?" for _ in remove)
+            self.db.execute(f"UPDATE event SET snapshot_id=NULL WHERE snapshot_id IN ({placeholders})", remove)
+            self.db.execute(f"DELETE FROM snapshot WHERE id IN ({placeholders})", remove)
+        self._update_lifecycle_summary(lifecycle_id)
+
+    def _cleanup_sealed_lifecycle(self, lifecycle_id: int) -> None:
+        self.db.execute("DELETE FROM service_session WHERE lifecycle_id=?", (lifecycle_id,))
+        self.db.execute("DELETE FROM event WHERE lifecycle_id=?", (lifecycle_id,))
+        self.db.execute("DELETE FROM snapshot WHERE lifecycle_id=?", (lifecycle_id,))
+
+    def _mark_capsule_removed(self, lifecycle_id: int) -> None:
+        self._update_lifecycle_summary(lifecycle_id, force_summary_only=True)
+
+    def _prune_evidence(self, *, required_headroom: int = 0, protect_lifecycle_id: int | None = None) -> list[int]:
+        removed: list[int] = []
+        target = int(self.settings.storage_limit_bytes * 0.75)
+        soft = int(self.settings.storage_limit_bytes * 0.85)
+        need_cleanup = self.managed_bytes() >= soft or self.managed_bytes() + required_headroom > self.settings.storage_limit_bytes
+        if not need_cleanup:
+            return removed
+        evidence = self.segment_store.evidence()
+        latest = self.db.execute(
+            "SELECT id FROM lifecycle WHERE host_id=? AND termination!='active' ORDER BY last_seen_at_ms DESC LIMIT 1",
+            (self.host_id,),
+        ).fetchone()
+        protected = {int(latest[0])} if latest else set()
+        if protect_lifecycle_id is not None:
+            protected.add(protect_lifecycle_id)
+        for item in evidence:
+            lifecycle_id = int(item["lifecycle_id"])
+            if lifecycle_id in protected:
+                continue
+            if self.managed_bytes() <= target and self.managed_bytes() + required_headroom <= self.settings.storage_limit_bytes:
+                break
+            self.segment_store.remove_capsule(item)
+            self._mark_capsule_removed(lifecycle_id)
+            removed.append(lifecycle_id)
+        if removed:
+            self.db.commit()
+            self.segment_store.rebuild_manifest()
+        return removed
+
+    def _seal_lifecycle(self, lifecycle_id: int) -> None:
+        lifecycle = self.db.execute("SELECT * FROM lifecycle WHERE id=?", (lifecycle_id,)).fetchone()
+        if not lifecycle or lifecycle["termination"] == "active":
+            return
+        final_path = self.segment_store.capsule_path(lifecycle_id, lifecycle["lifecycle_key"])
+        if final_path.exists() and self.segment_store.evidence_for(lifecycle_id):
+            with self.db:
+                self._cleanup_sealed_lifecycle(lifecycle_id)
+            return
+        required = self.path.stat().st_size + 2 * 1024 * 1024
+        self._prune_evidence(required_headroom=required, protect_lifecycle_id=lifecycle_id)
+        if self.managed_bytes() + required > self.settings.storage_limit_bytes:
+            self.persistence_state = "paused"
+            return
+        staging = Path(str(final_path) + ".next")
+        staging.unlink(missing_ok=True)
+        target = sqlite3.connect(staging, isolation_level=None)
+        try:
+            target.execute("PRAGMA page_size=4096")
+            target.execute("PRAGMA auto_vacuum=NONE")
+            target.executescript(SCHEMA)
+            target.executescript(INTERNAL_SCHEMA)
+            target.execute("ATTACH DATABASE ? AS source", (str(self.path),))
+            target.execute("BEGIN IMMEDIATE")
+            copy_rows(target, "source", "host", where="id=?", params=(self.host_id,))
+            copy_rows(target, "source", "lifecycle", where="id=?", params=(lifecycle_id,))
+            copy_rows(target, "source", "service_session", where="lifecycle_id=?", params=(lifecycle_id,))
+            ids = [int(row[0]) for row in self.db.execute("SELECT id FROM snapshot WHERE lifecycle_id=?", (lifecycle_id,))]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                copy_rows(target, "source", "snapshot", where=f"id IN ({placeholders})", params=ids)
+                for table in ("system_sample", "process_sample", "process_rank", "user_sample"):
+                    copy_rows(target, "source", table, where=f"snapshot_id IN ({placeholders})", params=ids)
+            copy_events(target, "source", ids, lifecycle_id=lifecycle_id)
+            generation = int(self.db.execute("SELECT generation FROM storage_meta WHERE singleton=1").fetchone()[0]) + 1
+            now = int(time.time() * 1000)
+            target.execute(
+                "INSERT INTO storage_meta VALUES(1,?,?, 'evidence',?,?,?,?)",
+                (FORMAT_VERSION, generation, now, now, lifecycle_id, lifecycle["lifecycle_key"]),
             )
-        """, (lifecycle_id, MIN_FINAL_SNAPSHOTS))
-        count = self.db.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=? AND detail_level='final' AND persistence_state='normal'", (lifecycle_id,)).fetchone()[0]
-        retention_state = "final_complete" if count >= MIN_FINAL_SNAPSHOTS else "final_partial"
-        self.db.execute("UPDATE lifecycle SET termination='unclean_or_unknown',ended_at_ms=last_seen_at_ms,summary_json=? WHERE id=?", (json.dumps({"retention_state":retention_state}, separators=(",", ":")), lifecycle_id))
+            for name, next_id in self.db.execute("SELECT name,next_id FROM storage_counter"):
+                target.execute("INSERT INTO storage_counter VALUES(?,?)", (name, next_id))
+            target.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            target.execute("COMMIT")
+            target.execute("DETACH DATABASE source")
+            target.execute("PRAGMA journal_mode=DELETE")
+            self._evidence_checkpoint("created")
+            ok, reason = database_ok(target, full=True)
+            if not ok:
+                raise RuntimeError(f"evidence capsule validation failed: {reason}")
+            full, trend = self._snapshot_counts(target, lifecycle_id)
+            if full > self.settings.final_snapshots_per_lifecycle or trend > self.settings.trend_snapshots_per_lifecycle:
+                raise RuntimeError("evidence capsule exceeds configured snapshot bounds")
+            if target.execute("SELECT count(*) FROM lifecycle WHERE id=?", (lifecycle_id,)).fetchone()[0] != 1:
+                raise RuntimeError("evidence capsule does not contain exactly one lifecycle")
+            self._evidence_checkpoint("validated")
+        except Exception:
+            target.close()
+            staging.unlink(missing_ok=True)
+            raise
+        finally:
+            try:
+                target.close()
+            except Exception:
+                pass
+        descriptor = os.open(staging, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self._evidence_checkpoint("fsynced")
+        os.replace(staging, final_path)
+        final_path.chmod(0o444)
+        _fsync_directory(self.segment_store.evidence_dir)
+        self._evidence_checkpoint("renamed")
+        self.segment_store.rebuild_manifest()
+        self._evidence_checkpoint("manifest")
+        with self.db:
+            self._cleanup_sealed_lifecycle(lifecycle_id)
+        self._evidence_checkpoint("cleaned")
+
+    def _recover_evidence_state(self) -> None:
+        with self.lock:
+            self.segment_store.rebuild_manifest()
+            completed = self.db.execute(
+                "SELECT id FROM lifecycle WHERE termination!='active' ORDER BY id"
+            ).fetchall()
+            for row in completed:
+                lifecycle_id = int(row[0])
+                active_count = int(self.db.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=?", (lifecycle_id,)).fetchone()[0])
+                capsule = self.segment_store.evidence_for(lifecycle_id)
+                if active_count and capsule:
+                    with self.db:
+                        self._cleanup_sealed_lifecycle(lifecycle_id)
+                elif active_count:
+                    try:
+                        self._seal_lifecycle(lifecycle_id)
+                    except Exception:
+                        self.persistence_state = "paused"
+                elif capsule is None:
+                    with self.db:
+                        self._mark_capsule_removed(lifecycle_id)
 
     def start_lifecycle(self, boot_id: str, started_at_ms: int, identity: dict[str, Any] | None = None, *, start_session: bool = True, collector_started_event: bool = True) -> int:
         now = int(time.time() * 1000)
@@ -333,6 +552,7 @@ class Repository:
         preferred_key = str(identity.get("container_instance_id") or identity.get("preferred_key") or boot_id)
         method = "instance_marker" if identity.get("container_instance_id") else ("pid1_fingerprint" if identity else "legacy_boot_id")
         confidence = "confirmed" if identity.get("container_instance_id") else ("probable" if identity else "legacy")
+        finalized_id: int | None = None
         with self.lock, self.db:
             active = self.db.execute("SELECT * FROM lifecycle WHERE host_id=? AND termination='active' ORDER BY id DESC LIMIT 1", (self.host_id,)).fetchone()
             baseline = bool(active and identity and active["pid1_start_ticks"] is None)
@@ -367,6 +587,7 @@ class Repository:
             else:
                 if active:
                     self._finalize_lifecycle(active["id"])
+                    finalized_id = int(active["id"])
                     if self.session_id:
                         self.db.execute("UPDATE service_session SET stopped_at_ms=? WHERE id=? AND stopped_at_ms IS NULL", (now, self.session_id))
                         self.session_id = None
@@ -394,6 +615,12 @@ class Repository:
                 if collector_started_event and gap_ms > self.settings.sample_interval_ms * 2:
                     self._insert_event(lifecycle_id, now, "collection_gap", _details_json({"gap_ms":gap_ms,"reason":"collector_unavailable"}))
         self.lifecycle_id = int(lifecycle_id)
+        if finalized_id is not None:
+            try:
+                with self.lock:
+                    self._seal_lifecycle(finalized_id)
+            except Exception:
+                self.persistence_state = "paused"
         latest_state = self.db.execute("SELECT persistence_state FROM snapshot WHERE lifecycle_id=? ORDER BY captured_at_ms DESC LIMIT 1", (self.lifecycle_id,)).fetchone()
         if latest_state and self.persistence_state != "paused":
             self.persistence_state = latest_state[0]
@@ -433,6 +660,14 @@ class Repository:
         if not self.lifecycle_id:
             raise RuntimeError("lifecycle is not initialized")
         with self.lock:
+            unsealed = self.db.execute(
+                """SELECT 1 FROM lifecycle l WHERE l.host_id=? AND l.termination!='active'
+                   AND EXISTS(SELECT 1 FROM snapshot s WHERE s.lifecycle_id=l.id) LIMIT 1""",
+                (self.host_id,),
+            ).fetchone()
+            if unsealed:
+                self.persistence_state = "paused"
+                return None
             lifecycle = self.db.execute("SELECT * FROM lifecycle WHERE id=?", (self.lifecycle_id,)).fetchone()
         if not data.identity and lifecycle and data.boot_id != lifecycle["boot_id"]:
             raise RuntimeError(f"snapshot boot_id {data.boot_id} does not match active legacy lifecycle")
@@ -472,6 +707,7 @@ class Repository:
                 self.db.execute("UPDATE lifecycle SET last_seen_at_ms=? WHERE id=?", (data.captured_at_ms,self.lifecycle_id))
                 if data.boot_id != lifecycle["boot_id"]:
                     self.db.execute("UPDATE lifecycle SET boot_id=? WHERE id=?", (data.boot_id,self.lifecycle_id))
+                self._prune_lifecycle_snapshots(self.lifecycle_id)
         except sqlite3.OperationalError as exc:
             if "full" not in str(exc).lower():
                 raise
@@ -479,150 +715,34 @@ class Repository:
             return None
         after = self.managed_bytes()
         self.max_transaction_bytes = max(self.max_transaction_bytes, max(0, after-before))
-        if self.segment_store.needs_rotation():
+        if after >= int(self.settings.storage_limit_bytes * 0.85):
             self.reclaim_requested = True
         self.persistence_state = state
         return snapshot_id
 
-    def _open_active(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=5, check_same_thread=False, isolation_level="IMMEDIATE")
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA journal_mode=DELETE")
-        connection.execute("PRAGMA synchronous=FULL")
-        connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute(f"PRAGMA max_page_count={max(128, int(self.settings.storage_limit_bytes * 0.8) // 4096)}")
-        return connection
-
-    def _carry_forward_ids(self) -> list[int]:
-        ids: set[int] = set()
-        if self.lifecycle_id:
-            lifecycle = self.db.execute("SELECT last_seen_at_ms FROM lifecycle WHERE id=?", (self.lifecycle_id,)).fetchone()
-            if lifecycle:
-                cutoff = int(lifecycle[0]) - FINAL_WINDOW_MS
-                ids.update(row[0] for row in self.db.execute(
-                    "SELECT id FROM snapshot WHERE lifecycle_id=? AND captured_at_ms>=?", (self.lifecycle_id, cutoff)
-                ))
-                ids.update(row[0] for row in self.db.execute(
-                    "SELECT id FROM snapshot WHERE lifecycle_id=? ORDER BY captured_at_ms DESC LIMIT ?",
-                    (self.lifecycle_id, MIN_FINAL_SNAPSHOTS),
-                ))
-        completed = self.db.execute(
-            "SELECT id FROM lifecycle WHERE host_id=? AND termination!='active' ORDER BY last_seen_at_ms DESC LIMIT 1",
-            (self.host_id,),
-        ).fetchone()
-        if completed:
-            ids.update(row[0] for row in self.db.execute(
-                "SELECT id FROM snapshot WHERE lifecycle_id=? AND detail_level='final' AND persistence_state='normal' "
-                "ORDER BY captured_at_ms DESC LIMIT ?", (completed[0], MIN_FINAL_SNAPSHOTS)
-            ))
-        return sorted(ids)
-
-    def _rotate(self) -> int:
-        self.db.commit()
-        ok, reason = database_ok(self.db)
-        if not ok:
-            raise RuntimeError(f"active database integrity check failed before rotation: {reason}")
-        current = self.db.execute(
-            "SELECT generation,created_at_ms FROM storage_meta WHERE singleton=1"
-        ).fetchone()
-        generation = int(current[0])
-        created_at_ms = int(current[1])
-        removed_before = len(self.segment_store.prepare_rotation(self.path.stat().st_size))
-        sealed_at_ms = int(time.time() * 1000)
-        sealed = self.segment_store.segments_dir / f"segment-{generation:08d}-{created_at_ms}-{sealed_at_ms}.sqlite3"
-        staging = self.path.with_suffix(".sqlite3.next")
-        if staging.exists():
-            staging.unlink()
-        carry_ids = self._carry_forward_ids()
-        sealed_connection = sqlite3.connect(sealed)
-        try:
-            self.db.backup(sealed_connection)
-            sealed_connection.execute("PRAGMA journal_mode=DELETE")
-            sealed_connection.execute(
-                "UPDATE storage_meta SET state='sealed',sealed_at_ms=? WHERE singleton=1", (sealed_at_ms,)
-            )
-            sealed_connection.commit()
-            ok, reason = database_ok(sealed_connection, full=True)
-            if not ok:
-                raise RuntimeError(f"sealed segment validation failed: {reason}")
-        except Exception:
-            sealed_connection.close()
-            sealed.unlink(missing_ok=True)
-            raise
-        finally:
-            try:
-                sealed_connection.close()
-            except Exception:
-                pass
-
-        target = sqlite3.connect(staging, isolation_level=None)
-        try:
-            target.execute("PRAGMA page_size=4096")
-            target.execute("PRAGMA auto_vacuum=NONE")
-            target.executescript(SCHEMA)
-            target.executescript(INTERNAL_SCHEMA)
-            target.execute("ATTACH DATABASE ? AS source", (str(sealed),))
-            target.execute("BEGIN IMMEDIATE")
-            for table in ("host", "lifecycle", "service_session"):
-                copy_rows(target, "source", table)
-            if carry_ids:
-                placeholders = ",".join("?" for _ in carry_ids)
-                copy_rows(target, "source", "snapshot", where=f"id IN ({placeholders})", params=carry_ids)
-                for table in ("system_sample", "process_sample", "process_rank", "user_sample"):
-                    copy_rows(target, "source", table, where=f"snapshot_id IN ({placeholders})", params=carry_ids)
-            copy_events(target, "source", carry_ids)
-            next_generation = generation + 1
-            target.execute(
-                "INSERT INTO storage_meta VALUES(1,?,?, 'active',?,NULL)",
-                (1, next_generation, sealed_at_ms),
-            )
-            for table in ("lifecycle", "service_session", "snapshot", "event"):
-                maximum = target.execute(f"SELECT COALESCE(max(id),0)+1 FROM source.{table}").fetchone()[0]
-                target.execute("INSERT INTO storage_counter VALUES(?,?)", (table, maximum))
-            target.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            target.execute("COMMIT")
-            target.execute("DETACH DATABASE source")
-            target.execute("PRAGMA journal_mode=DELETE")
-            ok, reason = database_ok(target, full=True)
-            if not ok:
-                raise RuntimeError(f"next active database validation failed: {reason}")
-        except Exception:
-            target.close()
-            staging.unlink(missing_ok=True)
-            sealed.unlink(missing_ok=True)
-            raise
-        finally:
-            try:
-                target.close()
-            except Exception:
-                pass
-        self.db.close()
-        os.replace(staging, self.path)
-        try:
-            sealed.chmod(0o444)
-        except OSError:
-            pass
-        self.db = self._open_active()
-        self.segment_store.rebuild_manifest(active_connection=self.db)
-        return removed_before + len(self.segment_store.prune())
-
     def reclaim(self) -> None:
         self.persistence_state = "reclaiming"
         before = self.managed_bytes()
-        removed = 0
+        unsealed = False
         try:
             with self.lock:
-                if self.segment_store.needs_rotation() or before >= int(self.settings.storage_limit_bytes * 0.85):
-                    removed = self._rotate()
-                else:
-                    removed = len(self.segment_store.prune())
+                removed = self._prune_evidence()
+                self._recover_evidence_state()
+                unsealed = self.db.execute(
+                    """SELECT 1 FROM lifecycle l WHERE l.host_id=? AND l.termination!='active'
+                       AND EXISTS(SELECT 1 FROM snapshot s WHERE s.lifecycle_id=l.id) LIMIT 1""",
+                    (self.host_id,),
+                ).fetchone() is not None
         finally:
             self.reclaim_requested = False
         after = self.managed_bytes()
-        self.persistence_state = "normal" if after < self.settings.storage_limit_bytes else "paused"
+        self.persistence_state = "normal" if not unsealed and after < self.settings.storage_limit_bytes - 2 * 1024 * 1024 else "paused"
         if self.persistence_state != "paused":
-            self.record_event("retention", {"state":"segmented","deleted_segments":removed,"before_bytes":before,"after_bytes":after})
+            try:
+                self.record_event("retention", {"state":"evidence_capsules","deleted_lifecycles":removed,"before_bytes":before,"after_bytes":after})
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
 
     def status(self, connection: sqlite3.Connection | None = None) -> dict[str, Any]:
         db = connection or self.db
