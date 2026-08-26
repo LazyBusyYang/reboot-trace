@@ -41,6 +41,39 @@ def _project_root() -> Path:
 
 
 @dataclass(frozen=True, slots=True)
+class RetentionPolicy:
+    storage_limit_bytes: int
+    sample_interval_ms: int
+    final_snapshots_per_lifecycle: int
+    trend_snapshots_per_lifecycle: int
+    trend_interval_ms: int
+
+    def __post_init__(self) -> None:
+        if self.storage_limit_bytes < 1024 * 1024:
+            raise ValueError("RT_STORAGE_LIMIT_MIB must be >= 1")
+        if self.sample_interval_ms < 1000:
+            raise ValueError("RT_SAMPLE_INTERVAL_SECONDS must be >= 1")
+        if not 1 <= self.final_snapshots_per_lifecycle <= 1000:
+            raise ValueError("RT_FINAL_SNAPSHOTS_PER_LIFECYCLE must be between 1 and 1000")
+        if not 0 <= self.trend_snapshots_per_lifecycle <= 1000:
+            raise ValueError("RT_TREND_SNAPSHOTS_PER_LIFECYCLE must be between 0 and 1000")
+        if self.trend_interval_ms < 1000:
+            raise ValueError("RT_TREND_INTERVAL_SECONDS must be >= 1")
+        if self.trend_snapshots_per_lifecycle and self.trend_interval_ms < self.sample_interval_ms:
+            raise ValueError("RT_TREND_INTERVAL_SECONDS must be >= RT_SAMPLE_INTERVAL_SECONDS")
+
+    @classmethod
+    def from_env(cls) -> "RetentionPolicy":
+        return cls(
+            storage_limit_bytes=_int("RT_STORAGE_LIMIT_MIB", 50) * 1024 * 1024,
+            sample_interval_ms=_int("RT_SAMPLE_INTERVAL_SECONDS", 5) * 1000,
+            final_snapshots_per_lifecycle=_int("RT_FINAL_SNAPSHOTS_PER_LIFECYCLE", 12, maximum=1000),
+            trend_snapshots_per_lifecycle=_int("RT_TREND_SNAPSHOTS_PER_LIFECYCLE", 12, minimum=0, maximum=1000),
+            trend_interval_ms=_int("RT_TREND_INTERVAL_SECONDS", 300) * 1000,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     data_dir: Path
     proc_root: Path
@@ -87,19 +120,13 @@ class Settings:
             parsed = urlsplit(origin)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
                 raise ValueError(f"RT_CORS_ORIGINS contains an invalid exact origin: {origin}")
-        storage_limit_bytes = _int("RT_STORAGE_LIMIT_MIB", 50) * 1024 * 1024
-        sample_interval_ms = _int("RT_SAMPLE_INTERVAL_SECONDS", 5) * 1000
-        final_snapshots = _int("RT_FINAL_SNAPSHOTS_PER_LIFECYCLE", 12, maximum=1000)
-        trend_snapshots = _int("RT_TREND_SNAPSHOTS_PER_LIFECYCLE", 12, minimum=0, maximum=1000)
-        trend_interval_ms = _int("RT_TREND_INTERVAL_SECONDS", 300) * 1000
-        if trend_snapshots and trend_interval_ms < sample_interval_ms:
-            raise ValueError("RT_TREND_INTERVAL_SECONDS must be >= RT_SAMPLE_INTERVAL_SECONDS")
+        retention = RetentionPolicy.from_env()
         return cls(
             data_dir=data_dir,
             proc_root=Path(os.getenv("RT_PROC_ROOT", "/proc")),
             host_passwd=Path(passwd) if passwd else None,
-            storage_limit_bytes=storage_limit_bytes,
-            sample_interval_ms=sample_interval_ms,
+            storage_limit_bytes=retention.storage_limit_bytes,
+            sample_interval_ms=retention.sample_interval_ms,
             process_top_n=_int("RT_PROCESS_TOP_N", 50, maximum=500),
             cmdline_max_bytes=max_cmd,
             cors_origins=origins,
@@ -109,7 +136,7 @@ class Settings:
             require_container_marker=_bool("RT_REQUIRE_CONTAINER_MARKER"),
             service_token=service_token,
             project_dir=project_dir,
-            final_snapshots_per_lifecycle=final_snapshots,
-            trend_snapshots_per_lifecycle=trend_snapshots,
-            trend_interval_ms=trend_interval_ms,
+            final_snapshots_per_lifecycle=retention.final_snapshots_per_lifecycle,
+            trend_snapshots_per_lifecycle=retention.trend_snapshots_per_lifecycle,
+            trend_interval_ms=retention.trend_interval_ms,
         )

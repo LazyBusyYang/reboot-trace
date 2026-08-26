@@ -161,7 +161,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def lifecycle_counts(connection:sqlite3.Connection,row:dict[str,Any]) -> tuple[int,int]:
         actual=connection.execute(
-            "SELECT sum(detail_level!='summary_only'),sum(detail_level='summary_only') FROM snapshot WHERE lifecycle_id=?",
+            """SELECT sum(detail_level IN ('full','final') AND persistence_state='normal'),
+                      sum(detail_level='summary_only') FROM snapshot WHERE lifecycle_id=?""",
             (row["id"],),
         ).fetchone()
         full=int(actual[0] or 0);trend=int(actual[1] or 0)
@@ -263,7 +264,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/lifecycles/{boot_id}/final",response_model=FinalResponse)
     async def final(request:Request,boot_id:str,count:int=Query(1,ge=1,le=12)):
-        r=repo(request); connection=db(request); lc=lifecycle_row(r,connection,boot_id); ids=[x[0] for x in connection.execute("SELECT id FROM snapshot WHERE lifecycle_id=? AND detail_level IN ('full','final') ORDER BY (detail_level='final') DESC,captured_at_ms DESC LIMIT ?",(lc["id"],count))]
+        r=repo(request); connection=db(request); lc=lifecycle_row(r,connection,boot_id); ids=[x[0] for x in connection.execute("SELECT id FROM snapshot WHERE lifecycle_id=? AND detail_level IN ('full','final') AND persistence_state='normal' ORDER BY (detail_level='final') DESC,captured_at_ms DESC LIMIT ?",(lc["id"],count))]
         if not ids: raise HTTPException(410,"DATA_REMOVED")
         snapshots_payload=[]
         for snapshot_id in ids:

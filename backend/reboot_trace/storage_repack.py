@@ -11,12 +11,48 @@ import time
 import uuid
 from pathlib import Path
 
+from .config import RetentionPolicy
 from .database import SCHEMA, SCHEMA_VERSION
 from .segment_store import FORMAT_VERSION, INTERNAL_SCHEMA, TABLE_KEYS, SegmentStore, _fsync_directory, copy_events, copy_rows, database_ok
 
 
 STATE_FILE = ".evidence-repack.json"
 DATA_TABLES = tuple(TABLE_KEYS)
+SAFETY_RESERVE_BYTES = 2 * 1024 * 1024
+OLD_LAYOUT_NAMES = (
+    "reboot-trace.sqlite3", "reboot-trace.sqlite3-journal", "reboot-trace.sqlite3-wal",
+    "reboot-trace.sqlite3-shm", "segments", "segments.json", "evidence", "evidence.json", "quarantine",
+)
+
+
+def _effective_policy(
+    *, storage_limit_bytes: int | None, final_count: int | None,
+    trend_count: int | None, trend_interval_ms: int | None,
+) -> RetentionPolicy:
+    configured = RetentionPolicy.from_env()
+    return RetentionPolicy(
+        storage_limit_bytes=storage_limit_bytes if storage_limit_bytes is not None else configured.storage_limit_bytes,
+        sample_interval_ms=configured.sample_interval_ms,
+        final_snapshots_per_lifecycle=final_count if final_count is not None else configured.final_snapshots_per_lifecycle,
+        trend_snapshots_per_lifecycle=trend_count if trend_count is not None else configured.trend_snapshots_per_lifecycle,
+        trend_interval_ms=trend_interval_ms if trend_interval_ms is not None else configured.trend_interval_ms,
+    )
+
+
+def add_policy_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--storage-limit-mib",type=int)
+    parser.add_argument("--final-snapshots",type=int)
+    parser.add_argument("--trend-snapshots",type=int)
+    parser.add_argument("--trend-interval-seconds",type=int)
+
+
+def policy_overrides(args: argparse.Namespace) -> dict[str, int | None]:
+    return {
+        "storage_limit_bytes": args.storage_limit_mib * 1024 * 1024 if args.storage_limit_mib is not None else None,
+        "final_count": args.final_snapshots,
+        "trend_count": args.trend_snapshots,
+        "trend_interval_ms": args.trend_interval_seconds * 1000 if args.trend_interval_seconds is not None else None,
+    }
 
 
 def _inside(path: Path, parent: Path) -> bool:
@@ -109,10 +145,14 @@ def _materialize_union(source: sqlite3.Connection, path: Path) -> None:
 
 def _selected_ids(source: sqlite3.Connection, lifecycle_id: int, final_count: int, trend_count: int, trend_interval_ms: int) -> tuple[list[int], list[int]]:
     rows = source.execute(
-        "SELECT id,captured_at_ms,detail_level FROM snapshot WHERE lifecycle_id=? ORDER BY captured_at_ms DESC,id DESC",
+        """SELECT id,captured_at_ms,detail_level,persistence_state FROM snapshot
+           WHERE lifecycle_id=? ORDER BY captured_at_ms DESC,id DESC""",
         (lifecycle_id,),
     ).fetchall()
-    full = [int(row["id"]) for row in rows if row["detail_level"] != "summary_only"][:final_count]
+    full = [
+        int(row["id"]) for row in rows
+        if row["detail_level"] in {"full", "final"} and row["persistence_state"] == "normal"
+    ][:final_count]
     full_set = set(full);buckets: dict[int,int] = {}
     newest_ms=int(rows[0]["captured_at_ms"]) if rows else 0
     trend_cutoff_ms=newest_ms-trend_count*trend_interval_ms
@@ -235,7 +275,7 @@ def _resume_install(data_dir: Path, state: dict[str, object]) -> None:
     phase=str(state.get("phase","prepared"))
     if phase == "prepared":
         old.mkdir(exist_ok=True)
-        for name in ("reboot-trace.sqlite3","segments","segments.json","evidence","evidence.json","quarantine"):
+        for name in OLD_LAYOUT_NAMES:
             source=data_dir/name
             destination=old/name
             if source.exists() and destination.exists():
@@ -274,7 +314,16 @@ def _install(data_dir: Path, stage: Path, backup: Path) -> None:
     _resume_install(data_dir,state)
 
 
-def repack(data_dir: Path, backup_root: Path, *, dry_run: bool = False, final_count: int = 12, trend_count: int = 12, trend_interval_ms: int = 300_000) -> dict[str,object]:
+def _preserved_root_bytes(data_dir: Path) -> int:
+    replaced = set(OLD_LAYOUT_NAMES) | {STATE_FILE, f"{STATE_FILE}.tmp"}
+    return sum(path.stat().st_size for path in data_dir.iterdir() if path.is_file() and path.name not in replaced)
+
+
+def repack(
+    data_dir: Path, backup_root: Path, *, dry_run: bool = False,
+    storage_limit_bytes: int | None = None, final_count: int | None = None,
+    trend_count: int | None = None, trend_interval_ms: int | None = None,
+) -> dict[str,object]:
     data_dir=data_dir.resolve();backup_root=backup_root.resolve()
     if _inside(backup_root,data_dir):raise RuntimeError("backup directory must be outside RT_DATA_DIR")
     state_path=data_dir/STATE_FILE
@@ -285,6 +334,10 @@ def repack(data_dir: Path, backup_root: Path, *, dry_run: bool = False, final_co
     active_path=data_dir/"reboot-trace.sqlite3"
     if SegmentStore.format_version(active_path)==FORMAT_VERSION:
         raise RuntimeError("storage is already format v2; evidence repack is not required")
+    policy=_effective_policy(
+        storage_limit_bytes=storage_limit_bytes,final_count=final_count,
+        trend_count=trend_count,trend_interval_ms=trend_interval_ms,
+    )
     paths=_sources(data_dir);_validate_sources(paths)
     source_format=SegmentStore.format_version(paths[0])
     guard=sqlite3.connect(paths[0],timeout=0,isolation_level=None)
@@ -293,18 +346,49 @@ def repack(data_dir: Path, backup_root: Path, *, dry_run: bool = False, final_co
         guard.close();raise RuntimeError("database is in use; stop the service before repack") from exc
     source=_union(paths)
     rows={table:int(source.execute(f"SELECT count(*) FROM {table}").fetchone()[0]) for table in DATA_TABLES}
-    required=sum(path.stat().st_size for path in paths)*2+2*1024*1024
-    result={"dry_run":dry_run,"source_format":source_format,"source_bytes":sum(path.stat().st_size for path in paths),"rows":rows,"required_free_bytes":required}
+    source_bytes=sum(path.stat().st_size for path in paths)
+    required=source_bytes+SAFETY_RESERVE_BYTES
+    result={
+        "dry_run":dry_run,"source_format":source_format,"source_bytes":source_bytes,"rows":rows,
+        "required_free_bytes":required,
+        "policy":{
+            "storage_limit_bytes":policy.storage_limit_bytes,
+            "final_snapshots_per_lifecycle":policy.final_snapshots_per_lifecycle,
+            "trend_snapshots_per_lifecycle":policy.trend_snapshots_per_lifecycle,
+            "trend_interval_ms":policy.trend_interval_ms,
+        },
+    }
     if shutil.disk_usage(data_dir).free<required:
         source.close();guard.execute("ROLLBACK");guard.close();raise RuntimeError("insufficient filesystem space for evidence repack")
-    if dry_run:
-        source.close();guard.execute("ROLLBACK");guard.close();return result
-    backup_root.mkdir(parents=True,exist_ok=True);backup=_backup(data_dir,backup_root)
     stage=data_dir/f".evidence-repack-{uuid.uuid4().hex}";stage.mkdir()
     source_open=True;guard_open=True
     try:
-        result.update(_build_layout(source,stage,final_count=final_count,trend_count=trend_count,trend_interval_ms=trend_interval_ms))
-        result["backup_dir"]=str(backup)
+        result.update(_build_layout(
+            source,stage,
+            final_count=policy.final_snapshots_per_lifecycle,
+            trend_count=policy.trend_snapshots_per_lifecycle,
+            trend_interval_ms=policy.trend_interval_ms,
+        ))
+        stage_bytes=SegmentStore(stage,policy.storage_limit_bytes).managed_bytes()+_preserved_root_bytes(data_dir)
+        budget_required=stage_bytes+SAFETY_RESERVE_BYTES
+        within_budget=budget_required<=policy.storage_limit_bytes
+        result.update(
+            estimated_output_bytes=stage_bytes,
+            budget_required_bytes=budget_required,
+            budget_headroom_bytes=policy.storage_limit_bytes-budget_required,
+            within_storage_budget=within_budget,
+        )
+        if dry_run:
+            source.close();source_open=False
+            guard.execute("ROLLBACK");guard.close();guard_open=False
+            shutil.rmtree(stage,ignore_errors=True)
+            return result
+        if not within_budget:
+            raise RuntimeError("repacked layout exceeds RT_STORAGE_LIMIT_MIB after the 2 MiB safety reserve")
+        backup_root.mkdir(parents=True,exist_ok=True)
+        if shutil.disk_usage(backup_root).free<source_bytes+SAFETY_RESERVE_BYTES:
+            raise RuntimeError("insufficient backup filesystem space for evidence repack")
+        backup=_backup(data_dir,backup_root);result["backup_dir"]=str(backup)
         source.close();source_open=False
         guard.execute("ROLLBACK");guard.close();guard_open=False
         _install(data_dir,stage,backup)
@@ -322,8 +406,9 @@ def repack(data_dir: Path, backup_root: Path, *, dry_run: bool = False, final_co
 def main(argv: list[str] | None = None) -> int:
     parser=argparse.ArgumentParser(description="Repack stopped reboot-trace storage into format-v2 evidence capsules")
     parser.add_argument("--data-dir",type=Path,required=True);parser.add_argument("--backup-dir",type=Path,required=True);parser.add_argument("--dry-run",action="store_true")
+    add_policy_arguments(parser)
     args=parser.parse_args(argv)
-    try:print(json.dumps(repack(args.data_dir,args.backup_dir,dry_run=args.dry_run),ensure_ascii=False,sort_keys=True))
+    try:print(json.dumps(repack(args.data_dir,args.backup_dir,dry_run=args.dry_run,**policy_overrides(args)),ensure_ascii=False,sort_keys=True))
     except Exception as exc:print(f"repack failed: {exc}",file=sys.stderr);return 1
     return 0
 

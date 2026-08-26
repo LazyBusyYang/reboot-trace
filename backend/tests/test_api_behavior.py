@@ -181,3 +181,22 @@ def test_final_minimum_remains_queryable(settings):
         finally:
             connection.close();repo.close()
     asyncio.run(run())
+
+
+def test_degraded_process_snapshot_is_not_exposed_as_final(settings,monkeypatch):
+    async def run():
+        app=create_app(settings);repo=Repository(settings,"host","test");repo.start_lifecycle("boot-a",1)
+        monkeypatch.setattr(repo,"_choose_detail",lambda _data,_available:("degraded_processes",1))
+        repo.write_snapshot(sample("boot-a"));repo.start_lifecycle("boot-b",2);app.state.repo=repo
+        connection=repo.read_connection(lifecycle_ref="boot-a");req=request(app);req.state.db=connection
+        try:
+            lifecycle=await endpoint(app,"/api/v1/lifecycles/{boot_id}")(req,"boot-a")
+            assert lifecycle["full_snapshot_count"]==0
+            assert lifecycle["trend_snapshot_count"]==1
+            assert lifecycle["retention_state"]=="summary_only"
+            with pytest.raises(HTTPException) as raised:
+                await endpoint(app,"/api/v1/lifecycles/{boot_id}/final")(req,"boot-a",1)
+            assert raised.value.status_code==410 and raised.value.detail=="DATA_REMOVED"
+        finally:
+            connection.close();repo.close()
+    asyncio.run(run())

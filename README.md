@@ -13,7 +13,7 @@ RT_PROJECT_DIR="$PWD" RT_PROC_ROOT=/proc RT_HOST_PASSWD=/etc/passwd RT_CORS_ORIG
 
 后端必须作为普通进程直接运行在目标容器内，使用本地 `/proc` 和目标容器根 overlay 中的实例 marker。标准部署默认使用 `/run/reboot-trace/container-instance-id`；无法由 root 准备目录的 dev1/4/5/9 使用 `scripts/instances/`，由普通用户在 `/tmp/reboot-trace-${UID}` 创建私有 marker。数据默认建议放在 `<项目根>/var/reboot-trace`；Git 项目目录本身不要求持久，但运维人员必须在启动前确认这个实际数据路径位于适合 SQLite 且能跨目标容器重建保留的挂载，否则应显式设置 `RT_DATA_DIR`。程序会拒绝明显位于根 overlay 或与 marker 同挂载的配置，但不会代替真实重建验收。
 
-后端使用 format v2 生命周期证据存储：`reboot-trace.sqlite3` 是 DELETE journal 模式的活动滚动库，`evidence/` 为每个已结束生命周期保存一个不可变胶囊，`evidence.json` 可由胶囊内元数据重建。每个生命周期默认只保留最后 12 个完整快照，以及最近一小时内按 5 分钟桶保留的最多 12 个 `summary_only` 趋势快照。总预算仍由 `RT_STORAGE_LIMIT_MIB` 控制；达到 85% 后按完整生命周期删除最老胶囊，直到低于 75%。运行期间不使用 WAL、incremental vacuum 或原地压缩。
+后端使用 format v2 生命周期证据存储：`reboot-trace.sqlite3` 是 DELETE journal 模式的活动滚动库，`evidence/` 为每个已结束生命周期保存一个不可变胶囊，`evidence.json` 可由胶囊内元数据重建。每个生命周期默认只保留最后 12 个完整快照，以及最近一小时内按 5 分钟桶保留的最多 12 个 `summary_only` 趋势快照。只有 `persistence_state=normal` 的 `full/final` 才属于完整证据；`degraded_processes` 会降为不含用户、进程明细的趋势证据。总预算仍由 `RT_STORAGE_LIMIT_MIB` 控制；达到 85% 后按完整生命周期删除最老胶囊，直到低于 75%。运行期间不使用 WAL、incremental vacuum 或原地压缩。
 
 滚动上限可通过 `RT_FINAL_SNAPSHOTS_PER_LIFECYCLE`、`RT_TREND_SNAPSHOTS_PER_LIFECYCLE` 和 `RT_TREND_INTERVAL_SECONDS` 调整；完整快照至少为 1，趋势数量可设为 0，趋势间隔不得小于采样间隔。
 
@@ -24,7 +24,9 @@ PYTHONPATH=backend python3 -m reboot_trace.storage_repack --data-dir "$RT_DATA_D
 PYTHONPATH=backend python3 -m reboot_trace.storage_repack --data-dir "$RT_DATA_DIR" --backup-dir /path/outside-data
 ```
 
-迁移会执行完整性和外键检查、生成带 SHA-256 的备份，并在安装阶段保持独占锁。安装使用 `.evidence-repack.json` 记录可恢复阶段；中断后使用相同命令和备份根目录即可幂等续跑。旧分段只在全部新胶囊校验通过后移出生产布局，损坏、占用或空间不足时不会开始安装。旧的 `storage_migrate` 命令保留为兼容入口，但同样生成 format v2 布局。
+命令默认读取 `RT_STORAGE_LIMIT_MIB` 和上述三项滚动配置，也可使用 `--storage-limit-mib`、`--final-snapshots`、`--trend-snapshots`、`--trend-interval-seconds` 显式覆盖。dry-run 会输出最终有效策略、预计布局大小、预算余量及 `within_storage_budget`；正式安装要求新布局额外保留 2 MiB 安全空间。
+
+迁移会执行完整性和外键检查、生成带 SHA-256 的备份，并在安装阶段保持独占锁。安装使用 `.evidence-repack.json` 记录可恢复阶段；中断后使用相同命令和备份根目录即可幂等续跑。旧分段只在全部新胶囊校验通过且通过受管预算检查后移出生产布局，损坏、占用或空间不足时不会开始安装。旧的 `storage_migrate` 命令保留为兼容入口，并接受相同策略参数。
 
 ## 前端开发
 

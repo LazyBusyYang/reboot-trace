@@ -331,7 +331,8 @@ class Repository:
     def _finalize_lifecycle(self, lifecycle_id: int) -> None:
         self._prune_lifecycle_snapshots(lifecycle_id)
         self.db.execute(
-            "UPDATE snapshot SET detail_level='final' WHERE lifecycle_id=? AND detail_level!='summary_only'",
+            """UPDATE snapshot SET detail_level='final' WHERE lifecycle_id=?
+               AND detail_level!='summary_only' AND persistence_state='normal'""",
             (lifecycle_id,),
         )
         self.db.execute(
@@ -342,7 +343,8 @@ class Repository:
 
     def _snapshot_counts(self, connection: sqlite3.Connection, lifecycle_id: int) -> tuple[int, int]:
         full = int(connection.execute(
-            "SELECT count(*) FROM snapshot WHERE lifecycle_id=? AND detail_level!='summary_only'",
+            """SELECT count(*) FROM snapshot WHERE lifecycle_id=?
+               AND detail_level IN ('full','final') AND persistence_state='normal'""",
             (lifecycle_id,),
         ).fetchone()[0])
         trend = int(connection.execute(
@@ -375,10 +377,14 @@ class Repository:
 
     def _prune_lifecycle_snapshots(self, lifecycle_id: int) -> None:
         rows = self.db.execute(
-            "SELECT id,captured_at_ms,detail_level FROM snapshot WHERE lifecycle_id=? ORDER BY captured_at_ms DESC,id DESC",
+            """SELECT id,captured_at_ms,detail_level,persistence_state FROM snapshot
+               WHERE lifecycle_id=? ORDER BY captured_at_ms DESC,id DESC""",
             (lifecycle_id,),
         ).fetchall()
-        dense = [int(row["id"]) for row in rows if row["detail_level"] != "summary_only"][:self.settings.final_snapshots_per_lifecycle]
+        dense = [
+            int(row["id"]) for row in rows
+            if row["detail_level"] in {"full", "final"} and row["persistence_state"] == "normal"
+        ][:self.settings.final_snapshots_per_lifecycle]
         dense_set = set(dense)
         buckets: dict[int, int] = {}
         newest_ms = int(rows[0]["captured_at_ms"]) if rows else 0

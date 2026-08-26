@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import reboot_trace.storage_repack as storage_repack
+import reboot_trace.storage_migrate as storage_migrate
 from reboot_trace.database import Repository
 from reboot_trace.storage_repack import repack
 from test_database import sample
@@ -112,6 +113,14 @@ def test_offline_repack_dry_run_backup_and_id_preservation(settings, tmp_path):
     backups = tmp_path / "backups"
     dry = repack(settings.data_dir, backups, dry_run=True)
     assert dry["dry_run"] is True
+    assert dry["policy"] == {
+        "storage_limit_bytes": 50 * 1024 * 1024,
+        "final_snapshots_per_lifecycle": 12,
+        "trend_snapshots_per_lifecycle": 12,
+        "trend_interval_ms": 300_000,
+    }
+    assert dry["estimated_output_bytes"] > 0
+    assert dry["within_storage_budget"] is True
     result = repack(settings.data_dir, backups)
     assert result["dry_run"] is False
     assert result["resumed"] is False
@@ -274,3 +283,100 @@ def test_repack_rejects_a_corrupt_legacy_segment(settings, tmp_path):
     (segments / "segment-000001.sqlite3").write_bytes(b"not a sqlite database")
     with pytest.raises((RuntimeError, sqlite3.DatabaseError)):
         repack(settings.data_dir, tmp_path / "backups")
+
+
+def test_repack_uses_nondefault_environment_retention_policy(settings, tmp_path, monkeypatch):
+    repo = Repository(settings, "host", "test")
+    lifecycle_id = repo.start_lifecycle("boot-a", 1)
+    for index in range(10):
+        data = sample("boot-a")
+        data.captured_at_ms = 1_000 + index * 5_000
+        data.scheduled_at_ms = data.captured_at_ms
+        repo.write_snapshot(data)
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("DROP TABLE storage_counter")
+    connection.execute("DROP TABLE storage_meta")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+    monkeypatch.setenv("RT_STORAGE_LIMIT_MIB", "20")
+    monkeypatch.setenv("RT_FINAL_SNAPSHOTS_PER_LIFECYCLE", "3")
+    monkeypatch.setenv("RT_TREND_SNAPSHOTS_PER_LIFECYCLE", "0")
+    monkeypatch.setenv("RT_TREND_INTERVAL_SECONDS", "300")
+
+    result = repack(settings.data_dir, tmp_path / "backups")
+    assert result["policy"]["storage_limit_bytes"] == 20 * 1024 * 1024
+    assert result["policy"]["final_snapshots_per_lifecycle"] == 3
+    assert result["policy"]["trend_snapshots_per_lifecycle"] == 0
+    reopened = Repository(replace(
+        settings,storage_limit_bytes=20*1024*1024,
+        final_snapshots_per_lifecycle=3,trend_snapshots_per_lifecycle=0,
+    ), "host", "test")
+    try:
+        assert reopened.db.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=?", (lifecycle_id,)).fetchone()[0] == 3
+        assert reopened._snapshot_counts(reopened.db, lifecycle_id) == (3, 0)
+    finally:
+        reopened.close()
+
+
+def test_repack_dry_run_reports_and_install_rejects_managed_budget_overflow(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    repo.start_lifecycle("boot-a", 1)
+    repo.write_snapshot(sample("boot-a"))
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("DROP TABLE storage_counter")
+    connection.execute("DROP TABLE storage_meta")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+
+    dry = repack(settings.data_dir, tmp_path / "backups", dry_run=True, storage_limit_bytes=1024*1024)
+    assert dry["within_storage_budget"] is False
+    assert dry["budget_headroom_bytes"] < 0
+    with pytest.raises(RuntimeError, match="exceeds RT_STORAGE_LIMIT_MIB"):
+        repack(settings.data_dir, tmp_path / "backups", storage_limit_bytes=1024*1024)
+    assert not (tmp_path / "backups").exists()
+
+
+def test_repack_does_not_count_degraded_source_snapshot_as_full(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    lifecycle_id = repo.start_lifecycle("boot-a", 1)
+    snapshot_id = repo.write_snapshot(sample("boot-a"))
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("UPDATE snapshot SET persistence_state='degraded_processes' WHERE id=?", (snapshot_id,))
+    connection.execute("DROP TABLE storage_counter")
+    connection.execute("DROP TABLE storage_meta")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+
+    repack(settings.data_dir, tmp_path / "backups")
+    reopened = Repository(settings, "host", "test")
+    try:
+        assert reopened._snapshot_counts(reopened.db, lifecycle_id) == (0, 1)
+        row = reopened.db.execute("SELECT detail_level,persistence_state FROM snapshot WHERE id=?", (snapshot_id,)).fetchone()
+        assert tuple(row) == ("summary_only", "system_only")
+    finally:
+        reopened.close()
+
+
+def test_storage_migrate_compatibility_entry_forwards_policy(tmp_path,monkeypatch):
+    captured={}
+
+    def fake_repack(data_dir,backup_root,**kwargs):
+        captured.update(data_dir=data_dir,backup_root=backup_root,**kwargs)
+        return {"ok":True}
+
+    monkeypatch.setattr(storage_migrate,"repack",fake_repack)
+    result=storage_migrate.migrate(
+        tmp_path/"data",tmp_path/"backup",dry_run=True,
+        storage_limit_bytes=20*1024*1024,final_count=3,trend_count=0,trend_interval_ms=600_000,
+    )
+    assert result=={"ok":True}
+    assert captured["storage_limit_bytes"]==20*1024*1024
+    assert captured["final_count"]==3
+    assert captured["trend_count"]==0
+    assert captured["trend_interval_ms"]==600_000

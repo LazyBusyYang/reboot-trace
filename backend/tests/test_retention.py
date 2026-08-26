@@ -41,6 +41,21 @@ def test_removed_snapshot_keeps_event_with_null_link(settings):
     repo.close()
 
 
+def test_degraded_process_snapshot_becomes_trend_not_full_evidence(settings,monkeypatch):
+    repo=Repository(settings,"host","test");lifecycle_id=repo.start_lifecycle("old",1)
+    monkeypatch.setattr(repo,"_choose_detail",lambda _data,_available:("degraded_processes",1))
+    snapshot_id=repo.write_snapshot(sample("old"))
+    row=repo.db.execute("SELECT detail_level,persistence_state FROM snapshot WHERE id=?",(snapshot_id,)).fetchone()
+    assert tuple(row)==("summary_only","system_only")
+    assert repo.db.execute("SELECT count(*) FROM process_sample WHERE snapshot_id=?",(snapshot_id,)).fetchone()[0]==0
+    assert repo.db.execute("SELECT count(*) FROM user_sample WHERE snapshot_id=?",(snapshot_id,)).fetchone()[0]==0
+    assert repo._snapshot_counts(repo.db,lifecycle_id)==(0,1)
+    repo.start_lifecycle("current",2)
+    history=repo.read_connection(lifecycle_ref="old")
+    try:assert repo._snapshot_counts(history,lifecycle_id)==(0,1)
+    finally:history.close();repo.close()
+
+
 def test_trend_snapshots_do_not_reach_beyond_the_recent_hour(settings):
     repo=Repository(settings,"host","test");lifecycle_id=repo.start_lifecycle("active",1)
     write_samples(repo,"active",20,start=1_000_000,step=5_000)
