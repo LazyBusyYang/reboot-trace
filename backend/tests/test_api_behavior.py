@@ -115,10 +115,14 @@ def test_lifecycle_and_process_history_cursor_pagination(settings):
             assert [item["boot_id"] for item in first["items"]] == ["boot-c","boot-b"]
             assert [item["boot_id"] for item in second["items"]] == ["boot-a"]
             history_endpoint=endpoint(app,"/api/v1/lifecycles/{boot_id}/processes/{pid}")
-            history1=await history_endpoint(req,"boot-a",1,10,None,None,2,None)
-            history2=await history_endpoint(req,"boot-a",1,10,None,None,2,history1["next_cursor"])
-            assert len(history1["items"]) == 2 and len(history2["items"]) == 1
-            assert {item["snapshot_id"] for item in history1["items"]}.isdisjoint({item["snapshot_id"] for item in history2["items"]})
+            history_connection=repo.read_connection(lifecycle_ref="boot-a")
+            req.state.db=history_connection
+            try:
+                history1=await history_endpoint(req,"boot-a",1,10,None,None,2,None)
+                history2=await history_endpoint(req,"boot-a",1,10,None,None,2,history1["next_cursor"])
+                assert len(history1["items"]) == 2 and len(history2["items"]) == 1
+                assert {item["snapshot_id"] for item in history1["items"]}.isdisjoint({item["snapshot_id"] for item in history2["items"]})
+            finally: history_connection.close()
         finally: repo.close()
     asyncio.run(run())
 
@@ -138,4 +142,61 @@ def test_legacy_boot_route_is_rejected_when_multiple_container_instances_match(s
             exact=await lifecycle_endpoint(request(app),"instance-b")
             assert exact["lifecycle_key"]=="instance-b"
         finally:repo.close()
+    asyncio.run(run())
+
+
+def test_historical_lifecycle_reports_actual_evidence_counts_and_twelve_final(settings):
+    async def run():
+        app=create_app(settings);repo=Repository(settings,"host","test")
+        old_id=repo.start_lifecycle("boot-a",1)
+        for index in range(12):
+            data=sample("boot-a");data.captured_at_ms=1_000+index*5_000;data.scheduled_at_ms=data.captured_at_ms
+            repo.write_snapshot(data)
+        repo.start_lifecycle("boot-b",2);app.state.repo=repo
+        connection=repo.read_connection(lifecycle_ref="boot-a");req=request(app);req.state.db=connection
+        try:
+            lifecycle=await endpoint(app,"/api/v1/lifecycles/{boot_id}")(req,"boot-a")
+            assert lifecycle["id"]==old_id
+            assert lifecycle["snapshot_count"]==12
+            assert lifecycle["full_snapshot_count"]==12
+            assert lifecycle["trend_snapshot_count"]==0
+            assert lifecycle["retention_state"]=="final_complete"
+            final=await endpoint(app,"/api/v1/lifecycles/{boot_id}/final")(req,"boot-a",12)
+            assert len(final["snapshots"])==12
+        finally:
+            connection.close();repo.close()
+    asyncio.run(run())
+
+
+def test_final_minimum_remains_queryable(settings):
+    async def run():
+        app=create_app(settings);repo=Repository(settings,"host","test")
+        repo.start_lifecycle("boot-a",1);repo.write_snapshot(sample("boot-a"));repo.start_lifecycle("boot-b",2)
+        app.state.repo=repo;connection=repo.read_connection(lifecycle_ref="boot-a");req=request(app);req.state.db=connection
+        try:
+            lifecycle=await endpoint(app,"/api/v1/lifecycles/{boot_id}")(req,"boot-a")
+            assert lifecycle["retention_state"]=="final_minimum"
+            final=await endpoint(app,"/api/v1/lifecycles/{boot_id}/final")(req,"boot-a",1)
+            assert len(final["snapshots"])==1
+        finally:
+            connection.close();repo.close()
+    asyncio.run(run())
+
+
+def test_degraded_process_snapshot_is_not_exposed_as_final(settings,monkeypatch):
+    async def run():
+        app=create_app(settings);repo=Repository(settings,"host","test");repo.start_lifecycle("boot-a",1)
+        monkeypatch.setattr(repo,"_choose_detail",lambda _data,_available:("degraded_processes",1))
+        repo.write_snapshot(sample("boot-a"));repo.start_lifecycle("boot-b",2);app.state.repo=repo
+        connection=repo.read_connection(lifecycle_ref="boot-a");req=request(app);req.state.db=connection
+        try:
+            lifecycle=await endpoint(app,"/api/v1/lifecycles/{boot_id}")(req,"boot-a")
+            assert lifecycle["full_snapshot_count"]==0
+            assert lifecycle["trend_snapshot_count"]==1
+            assert lifecycle["retention_state"]=="summary_only"
+            with pytest.raises(HTTPException) as raised:
+                await endpoint(app,"/api/v1/lifecycles/{boot_id}/final")(req,"boot-a",1)
+            assert raised.value.status_code==410 and raised.value.detail=="DATA_REMOVED"
+        finally:
+            connection.close();repo.close()
     asyncio.run(run())

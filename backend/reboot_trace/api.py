@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import time
+from urllib.parse import unquote
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -118,7 +119,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return response
         semaphore=getattr(request.app.state,"query_semaphore",None) or asyncio.Semaphore(8)
         async with semaphore:
-            connection=repository.read_connection()
+            parts=request.url.path.split("/")
+            lifecycle_ref=unquote(parts[4]) if len(parts)>4 and parts[1:4]==["api","v1","lifecycles"] else None
+            connection=repository.read_connection(lifecycle_ref=lifecycle_ref)
             request.state.db=connection
             try:
                 response=await call_next(request)
@@ -155,6 +158,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def repo(request: Request) -> Repository: return request.app.state.repo
     def db(request: Request) -> sqlite3.Connection: return getattr(request.state,"db",repo(request).db)
+
+    def lifecycle_counts(connection:sqlite3.Connection,row:dict[str,Any]) -> tuple[int,int]:
+        actual=connection.execute(
+            """SELECT sum(detail_level IN ('full','final') AND persistence_state='normal'),
+                      sum(detail_level='summary_only') FROM snapshot WHERE lifecycle_id=?""",
+            (row["id"],),
+        ).fetchone()
+        full=int(actual[0] or 0);trend=int(actual[1] or 0)
+        if full+trend==0:
+            summary=json.loads(row.get("summary_json") or "{}")
+            full=int(summary.get("full_snapshot_count",0));trend=int(summary.get("trend_snapshot_count",0))
+        return full,trend
+
+    def populate_retention(connection:sqlite3.Connection,row:dict[str,Any]) -> None:
+        full,trend=lifecycle_counts(connection,row);row["full_snapshot_count"]=full;row["trend_snapshot_count"]=trend
+        row["snapshot_count"]=full+trend
+        row["retention_state"]="complete" if row["termination"]=="active" else ("final_complete" if full>=settings.final_snapshots_per_lifecycle else "final_partial" if full>=2 else "final_minimum" if full==1 else "summary_only")
 
     @app.get("/health/live")
     async def live(): return {"status":"ok"}
@@ -197,9 +217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sql+=" ORDER BY id DESC LIMIT ?"; params.append(limit+1)
         rows=[dict(x) for x in connection.execute(sql,params).fetchall()]; more=len(rows)>limit; rows=rows[:limit]
         for row in rows:
-            row["snapshot_count"]=connection.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=?",(row["id"],)).fetchone()[0]
-            summary=json.loads(row.get("summary_json") or "{}")
-            row["retention_state"]=summary.get("retention_state", "complete" if row["snapshot_count"] else "summary_only")
+            populate_retention(connection,row)
         return _response(r,{"items":rows,"next_cursor":_cursor(rows[-1]["id"],scope) if more else None})
 
     def lifecycle_row(r:Repository,connection:sqlite3.Connection,lifecycle_ref:str):
@@ -215,7 +233,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/lifecycles/{boot_id}",response_model=LifecycleResponse)
     async def lifecycle(request:Request,boot_id:str):
-        r=repo(request); connection=db(request); row=dict(lifecycle_row(r,connection,boot_id)); row["snapshot_count"]=connection.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=?",(row["id"],)).fetchone()[0]; summary=json.loads(row.get("summary_json") or "{}"); row["retention_state"]=summary.get("retention_state", "complete" if row["snapshot_count"] else "summary_only"); return _response(r,row)
+        r=repo(request); connection=db(request); row=dict(lifecycle_row(r,connection,boot_id)); populate_retention(connection,row); return _response(r,row)
 
     @app.get("/api/v1/lifecycles/{boot_id}/snapshots",response_model=SnapshotPage)
     async def snapshots(request:Request,boot_id:str,from_ms:int|None=None,to_ms:int|None=None,detail_level:str|None=None,limit:int=Query(100,ge=1,le=1000),cursor:str|None=None):
@@ -245,8 +263,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         r=repo(request); connection=db(request); lc=lifecycle_row(r,connection,boot_id); return _response(r,{**lifecycle_payload(lc),**full_snapshot(connection,lc["id"],snapshot_id)})
 
     @app.get("/api/v1/lifecycles/{boot_id}/final",response_model=FinalResponse)
-    async def final(request:Request,boot_id:str,count:int=Query(1,ge=1,le=10)):
-        r=repo(request); connection=db(request); lc=lifecycle_row(r,connection,boot_id); ids=[x[0] for x in connection.execute("SELECT id FROM snapshot WHERE lifecycle_id=? AND persistence_state='normal' AND detail_level IN ('full','final') ORDER BY (detail_level='final') DESC,captured_at_ms DESC LIMIT ?",(lc["id"],count))]
+    async def final(request:Request,boot_id:str,count:int=Query(1,ge=1,le=12)):
+        r=repo(request); connection=db(request); lc=lifecycle_row(r,connection,boot_id); ids=[x[0] for x in connection.execute("SELECT id FROM snapshot WHERE lifecycle_id=? AND detail_level IN ('full','final') AND persistence_state='normal' ORDER BY (detail_level='final') DESC,captured_at_ms DESC LIMIT ?",(lc["id"],count))]
         if not ids: raise HTTPException(410,"DATA_REMOVED")
         snapshots_payload=[]
         for snapshot_id in ids:

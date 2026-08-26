@@ -82,6 +82,7 @@ class LifecycleSummary(ContractModel):
     id:int;host_id:str;boot_id:str;lifecycle_key:str;started_at_ms:int;last_seen_at_ms:int
     ended_at_ms:int|None=None;termination:str;summary_json:str
     snapshot_count:int=0;retention_state:str="complete"
+    full_snapshot_count:int=0;trend_snapshot_count:int=0
     container_instance_id:str|None=None;pid1_start_ticks:int|None=None;pid_namespace_inode:int|None=None
     cgroup_hash:str|None=None;detection_method:str="legacy";detection_confidence:str="unknown"
     identity_first_observed_at_ms:int|None=None

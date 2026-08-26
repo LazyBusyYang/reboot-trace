@@ -24,4 +24,4 @@ scripts/instances/start-dev-4.sh stop
 
 旧版本只包含数字 PID 的文件会被识别为 legacy。`stop` 仅在 cmdline、端口和 `RT_DATA_DIR` 全部匹配当前实例后才停止旧进程；`start` 不会覆盖仍在运行或身份存疑的 legacy PID 文件。
 
-放弃某个实例的旧历史时，应先停止服务并把完整 data 目录备份到该目录之外；活动库、`segments/`、`segments.json` 和 `quarantine/` 必须作为同一存储集合处理，保留 `host-id` 与 `bound-hostname`。不要在后端运行时删除或复制数据库文件。旧 schema v3 单库必须使用 `python -m reboot_trace.storage_migrate` 显式离线迁移，不能依赖启动脚本自动转换。
+放弃某个实例的旧历史时，应先停止服务并把完整 data 目录备份到该目录之外；活动库、`evidence/`、`evidence.json` 和 `quarantine/` 必须作为同一存储集合处理，保留 `host-id` 与 `bound-hostname`。不要在后端运行时删除或复制数据库文件。旧 schema v3 单库或 format v1 分段布局必须使用 `python -m reboot_trace.storage_repack` 显式离线重打包，不能依赖启动脚本自动转换。

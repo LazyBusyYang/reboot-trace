@@ -1,186 +1,140 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
-import time
+from collections import namedtuple
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+import reboot_trace.storage_repack as storage_repack
 import reboot_trace.storage_migrate as storage_migrate
 from reboot_trace.database import Repository
-from reboot_trace.storage_migrate import migrate
+from reboot_trace.storage_repack import repack
 from test_database import sample
 
 
-def test_active_database_uses_delete_journal_and_no_auto_vacuum(settings):
+def test_active_database_uses_format_v2_delete_journal_and_no_auto_vacuum(settings):
     repo = Repository(settings, "host", "test")
     try:
         assert repo.db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert repo.db.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
         metadata = repo.db.execute("SELECT format_version,generation,state FROM storage_meta").fetchone()
-        assert tuple(metadata) == (1, 1, "active")
-        assert (settings.data_dir / "segments.json").is_file()
+        assert tuple(metadata) == (2, 1, "active")
+        payload = json.loads((settings.data_dir / "evidence.json").read_text())
+        assert payload["format_version"] == 2
+        assert payload["evidence"] == []
     finally:
         repo.close()
 
 
-def test_rotation_preserves_global_ids_and_union_queries(settings):
+def test_lifecycle_sealing_preserves_global_ids_and_opens_one_capsule(settings):
     repo = Repository(settings, "host", "test")
     lifecycle_id = repo.start_lifecycle("boot-a", 1)
-    first = repo.write_snapshot(sample("boot-a"))
-    assert first
-    assert repo._rotate() == 0
-    second_data = sample("boot-a")
-    second_data.captured_at_ms += 1_000
-    second_data.scheduled_at_ms += 1_000
-    second = repo.write_snapshot(second_data)
-    assert second and second > first
-    connection = repo.read_connection()
+    snapshot_id = repo.write_snapshot(sample("boot-a"))
+    repo.start_lifecycle("boot-b", 2)
     try:
-        assert connection.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=?", (lifecycle_id,)).fetchone()[0] == 2
-        assert [row[0] for row in connection.execute("SELECT id FROM snapshot ORDER BY id")] == [first, second]
+        assert repo.db.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=?", (lifecycle_id,)).fetchone()[0] == 0
+        capsule = repo.segment_store.evidence_for(lifecycle_id)
+        assert capsule is not None and capsule.is_file()
+        connection = repo.read_connection(lifecycle_ref="boot-a")
+        try:
+            assert [row[1] for row in connection.execute("PRAGMA database_list")] == ["main"]
+            assert connection.execute("SELECT id FROM snapshot WHERE lifecycle_id=?", (lifecycle_id,)).fetchone()[0] == snapshot_id
+        finally:
+            connection.close()
+        assert repo.db.execute("SELECT next_id FROM storage_counter WHERE name='snapshot'").fetchone()[0] > snapshot_id
     finally:
-        connection.close()
         repo.close()
 
 
-def test_rotation_nulls_event_links_to_snapshots_outside_carry_window(settings):
+def test_missing_manifest_is_rebuilt_from_capsule_metadata(settings):
     repo = Repository(settings, "host", "test")
-    repo.start_lifecycle("boot-a", 1)
-    base = int(time.time() * 1000) - 30 * 60 * 1000
-    linked_event_id = None
-    linked_snapshot_id = None
-    for index in range(14):
-        data = sample("boot-a")
-        data.captured_at_ms = base + index * 60_000
-        data.scheduled_at_ms = data.captured_at_ms
-        if index == 0:
-            data.events = [{"type": "collector_error", "details": {"reason": "old"}}]
-        snapshot_id = repo.write_snapshot(data)
-        if index == 0:
-            linked_snapshot_id = snapshot_id
-            linked_event_id = repo.db.execute(
-                "SELECT id FROM event WHERE snapshot_id=?", (snapshot_id,)
-            ).fetchone()[0]
-    recent = sample("boot-a")
-    repo.write_snapshot(recent)
-
-    repo._rotate()
-    assert repo.db.execute("SELECT 1 FROM snapshot WHERE id=?", (linked_snapshot_id,)).fetchone() is None
-    event = repo.db.execute("SELECT snapshot_id FROM event WHERE id=?", (linked_event_id,)).fetchone()
-    assert event is not None and event[0] is None
-    assert repo.db.execute("PRAGMA foreign_key_check").fetchall() == []
-    repo.close()
-
-
-def test_missing_manifest_is_rebuilt_from_database_metadata(settings):
-    repo = Repository(settings, "host", "test")
-    repo.start_lifecycle("boot-a", 1)
+    lifecycle_id = repo.start_lifecycle("boot-a", 1)
     repo.write_snapshot(sample("boot-a"))
-    repo._rotate()
+    repo.start_lifecycle("boot-b", 2)
     repo.close()
-    manifest = settings.data_dir / "segments.json"
+    manifest = settings.data_dir / "evidence.json"
     manifest.unlink()
+
     reopened = Repository(settings, "host", "test")
     try:
         payload = json.loads(manifest.read_text())
-        assert payload["format_version"] == 1
-        assert len(payload["segments"]) == 1
+        assert payload["format_version"] == 2
+        assert [item["lifecycle_id"] for item in payload["evidence"]] == [lifecycle_id]
     finally:
         reopened.close()
 
 
-def test_interrupted_staging_files_are_quarantined_and_counted(settings):
+def test_interrupted_invalid_capsule_and_manifest_are_quarantined(settings):
     repo = Repository(settings, "host", "test")
     repo.close()
-    staging = settings.data_dir / "reboot-trace.sqlite3.next"
-    manifest_staging = settings.data_dir / "segments.json.tmp"
+    staging = settings.data_dir / "evidence" / "lifecycle-000000000001-invalid.sqlite3.next"
+    manifest_staging = settings.data_dir / "evidence.json.tmp"
     staging.write_bytes(b"incomplete database")
     manifest_staging.write_bytes(b"incomplete manifest")
 
     reopened = Repository(settings, "host", "test")
     try:
-        quarantined = list((settings.data_dir / "quarantine").iterdir())
-        assert len(quarantined) == 2
+        names = [path.name for path in (settings.data_dir / "quarantine").iterdir()]
+        assert any("invalid.sqlite3.next.interrupted" in name for name in names)
+        assert any("evidence.json.tmp.interrupted" in name for name in names)
         assert not staging.exists()
         assert not manifest_staging.exists()
-        assert reopened.managed_bytes() >= sum(path.stat().st_size for path in quarantined)
-        assert reopened.db.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     finally:
         reopened.close()
 
 
-def test_rotation_refuses_when_peak_headroom_exceeds_budget(settings):
+def test_format_v1_requires_explicit_storage_repack(settings):
     repo = Repository(settings, "host", "test")
-    try:
-        active_size = repo.path.stat().st_size
-        repo.segment_store.storage_limit_bytes = repo.managed_bytes() + active_size * 2
-        with pytest.raises(RuntimeError, match="headroom"):
-            repo.segment_store.prepare_rotation(active_size)
-        staging = settings.data_dir / "reboot-trace.sqlite3.next"
-        staging.write_bytes(b"x" * 4096)
-        assert repo.managed_bytes() >= repo.path.stat().st_size + staging.stat().st_size
-    finally:
-        repo.close()
-
-
-def test_current_v3_single_file_requires_explicit_migration(settings):
-    repo = Repository(settings, "host", "test")
-    repo.start_lifecycle("boot-a", 1)
     repo.close()
     connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
-    connection.execute("DROP TABLE storage_counter")
-    connection.execute("DROP TABLE storage_meta")
-    connection.commit(); connection.close()
-    (settings.data_dir / "segments.json").unlink()
-    with pytest.raises(RuntimeError, match="offline migration"):
+    connection.execute("UPDATE storage_meta SET format_version=1")
+    connection.commit()
+    connection.close()
+    with pytest.raises(RuntimeError, match="storage_repack"):
         Repository(settings, "host", "test")
 
 
-def test_offline_migration_preserves_ids_and_creates_backup(settings, tmp_path):
+def test_offline_repack_dry_run_backup_and_id_preservation(settings, tmp_path):
     repo = Repository(settings, "host", "test")
     lifecycle_id = repo.start_lifecycle("boot-a", 1)
-    base = int(time.time() * 1000) - 30 * 60 * 1000
-    linked_event_id = None
-    snapshot_id = None
-    for index in range(15):
-        data = sample("boot-a")
-        data.captured_at_ms = base + index * 60_000
-        data.scheduled_at_ms = data.captured_at_ms
-        if index == 0:
-            data.events = [{"type": "collector_error", "details": {"reason": "old"}}]
-        current_id = repo.write_snapshot(data)
-        if index == 0:
-            snapshot_id = current_id
-            linked_event_id = repo.db.execute(
-                "SELECT id FROM event WHERE snapshot_id=?", (current_id,)
-            ).fetchone()[0]
-    repo.write_snapshot(sample("boot-a"))
+    snapshot_id = repo.write_snapshot(sample("boot-a"))
     repo.close()
     connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
     connection.execute("DROP TABLE storage_counter")
     connection.execute("DROP TABLE storage_meta")
-    connection.commit(); connection.close()
-    (settings.data_dir / "segments.json").unlink()
-    dry = migrate(settings.data_dir, tmp_path / "backups", dry_run=True)
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+
+    backups = tmp_path / "backups"
+    dry = repack(settings.data_dir, backups, dry_run=True)
     assert dry["dry_run"] is True
-    result = migrate(settings.data_dir, tmp_path / "backups")
+    assert dry["policy"] == {
+        "storage_limit_bytes": 50 * 1024 * 1024,
+        "final_snapshots_per_lifecycle": 12,
+        "trend_snapshots_per_lifecycle": 12,
+        "trend_interval_ms": 300_000,
+    }
+    assert dry["estimated_output_bytes"] > 0
+    assert dry["within_storage_budget"] is True
+    result = repack(settings.data_dir, backups)
     assert result["dry_run"] is False
-    assert (settings.data_dir / "segments.json").is_file()
-    assert (settings.data_dir / "segments").is_dir()
-    migrated = Repository(replace(settings, segment_target_bytes=1024 * 1024), "host", "test")
-    connection = migrated.read_connection()
+    assert result["resumed"] is False
+    assert (Path(str(result["backup_dir"])) / "sha256.json").is_file()
+
+    reopened = Repository(replace(settings, storage_limit_bytes=32 * 1024 * 1024), "host", "test")
     try:
-        assert connection.execute("SELECT id FROM lifecycle WHERE lifecycle_key='boot-a'").fetchone()[0] == lifecycle_id
-        assert connection.execute("SELECT id FROM snapshot WHERE id=?", (snapshot_id,)).fetchone()[0] == snapshot_id
-        assert migrated.db.execute("SELECT snapshot_id FROM event WHERE id=?", (linked_event_id,)).fetchone()[0] is None
+        assert reopened.db.execute("SELECT id FROM lifecycle WHERE lifecycle_key='boot-a'").fetchone()[0] == lifecycle_id
+        assert reopened.db.execute("SELECT id FROM snapshot WHERE id=?", (snapshot_id,)).fetchone()[0] == snapshot_id
     finally:
-        connection.close()
-        migrated.close()
+        reopened.close()
 
 
-def test_offline_migration_resumes_after_install_interruption(settings, tmp_path, monkeypatch):
+def test_offline_repack_resumes_after_atomic_install_interruption(settings, tmp_path, monkeypatch):
     repo = Repository(settings, "host", "test")
     repo.start_lifecycle("boot-a", 1)
     repo.write_snapshot(sample("boot-a"))
@@ -190,27 +144,239 @@ def test_offline_migration_resumes_after_install_interruption(settings, tmp_path
     connection.execute("DROP TABLE storage_meta")
     connection.commit()
     connection.close()
-    (settings.data_dir / "segments.json").unlink()
+    (settings.data_dir / "evidence.json").unlink()
 
-    original_move = storage_migrate._move_once
+    original = storage_repack._install_checkpoint
     interrupted = False
 
-    def fail_after_segments(source, destination):
+    def fail_after_old_layout_moved(phase: str) -> None:
         nonlocal interrupted
-        if destination.name == "quarantine" and not interrupted:
+        if phase == "old_moved" and not interrupted:
             interrupted = True
             raise OSError("injected install interruption")
-        return original_move(source, destination)
 
-    monkeypatch.setattr(storage_migrate, "_move_once", fail_after_segments)
+    monkeypatch.setattr(storage_repack, "_install_checkpoint", fail_after_old_layout_moved)
     with pytest.raises(OSError, match="injected"):
-        migrate(settings.data_dir, tmp_path / "backups")
-    assert (settings.data_dir / ".segment-migration.json").is_file()
-    assert (settings.data_dir / "segments").is_dir()
+        repack(settings.data_dir, tmp_path / "backups")
+    assert (settings.data_dir / storage_repack.STATE_FILE).is_file()
 
-    monkeypatch.setattr(storage_migrate, "_move_once", original_move)
-    result = migrate(settings.data_dir, tmp_path / "backups")
+    monkeypatch.setattr(storage_repack, "_install_checkpoint", original)
+    result = repack(settings.data_dir, tmp_path / "backups")
     assert result["resumed"] is True
-    assert not (settings.data_dir / ".segment-migration.json").exists()
+    assert not (settings.data_dir / storage_repack.STATE_FILE).exists()
     reopened = Repository(settings, "host", "test")
     reopened.close()
+
+
+def test_repack_refuses_an_already_format_v2_layout(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    repo.close()
+    with pytest.raises(RuntimeError, match="already format v2"):
+        repack(settings.data_dir, tmp_path / "backups")
+
+
+def test_format_v1_segments_become_per_lifecycle_capsules(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    old_id = repo.start_lifecycle("boot-a", 1)
+    old_snapshot = repo.write_snapshot(sample("boot-a"))
+    repo.start_lifecycle("boot-b", 2)
+    old_capsule = repo.segment_store.evidence_for(old_id)
+    assert old_capsule is not None
+    repo.close()
+
+    segments = settings.data_dir / "segments"
+    segments.mkdir()
+    old_capsule.chmod(0o600)
+    os.replace(old_capsule, segments / "segment-000001.sqlite3")
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("UPDATE storage_meta SET format_version=1")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+    (settings.data_dir / "segments.json").write_text("{}\n")
+
+    result = repack(settings.data_dir, tmp_path / "backups")
+    assert result["source_format"] == 1
+    reopened = Repository(settings, "host", "test")
+    history = reopened.read_connection(lifecycle_ref="boot-a")
+    try:
+        assert history.execute("SELECT id FROM snapshot WHERE id=?", (old_snapshot,)).fetchone()[0] == old_snapshot
+        assert reopened.segment_store.evidence_for(old_id) is not None
+    finally:
+        history.close()
+        reopened.close()
+
+
+def test_repack_corrects_false_final_state_when_old_segment_is_missing(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    old_id = repo.start_lifecycle("boot-a", 1)
+    repo.write_snapshot(sample("boot-a"))
+    repo.start_lifecycle("boot-b", 2)
+    old_capsule = repo.segment_store.evidence_for(old_id)
+    assert old_capsule is not None
+    old_capsule.unlink()
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("UPDATE storage_meta SET format_version=1")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+    (settings.data_dir / "segments").mkdir()
+    (settings.data_dir / "segments.json").write_text("{}\n")
+
+    repack(settings.data_dir, tmp_path / "backups")
+    reopened = Repository(settings, "host", "test")
+    try:
+        summary = json.loads(reopened.db.execute("SELECT summary_json FROM lifecycle WHERE id=?", (old_id,)).fetchone()[0])
+        assert summary["retention_state"] == "summary_only"
+        assert summary["full_snapshot_count"] == 0
+        assert summary["trend_snapshot_count"] == 0
+    finally:
+        reopened.close()
+
+
+def test_repack_rejects_an_active_writer(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    repo.start_lifecycle("boot-a", 1)
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("DROP TABLE storage_counter")
+    connection.execute("DROP TABLE storage_meta")
+    connection.commit()
+    (settings.data_dir / "evidence.json").unlink()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(RuntimeError, match="database is in use"):
+            repack(settings.data_dir, tmp_path / "backups")
+    finally:
+        connection.rollback()
+        connection.close()
+
+
+def test_repack_rejects_insufficient_filesystem_space(settings, tmp_path, monkeypatch):
+    repo = Repository(settings, "host", "test")
+    repo.start_lifecycle("boot-a", 1)
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("DROP TABLE storage_counter")
+    connection.execute("DROP TABLE storage_meta")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(storage_repack.shutil, "disk_usage", lambda _path: usage(1, 1, 0))
+    with pytest.raises(RuntimeError, match="insufficient filesystem space"):
+        repack(settings.data_dir, tmp_path / "backups")
+
+
+def test_repack_rejects_a_corrupt_legacy_segment(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    repo.start_lifecycle("boot-a", 1)
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("UPDATE storage_meta SET format_version=1")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+    segments = settings.data_dir / "segments"
+    segments.mkdir()
+    (segments / "segment-000001.sqlite3").write_bytes(b"not a sqlite database")
+    with pytest.raises((RuntimeError, sqlite3.DatabaseError)):
+        repack(settings.data_dir, tmp_path / "backups")
+
+
+def test_repack_uses_nondefault_environment_retention_policy(settings, tmp_path, monkeypatch):
+    repo = Repository(settings, "host", "test")
+    lifecycle_id = repo.start_lifecycle("boot-a", 1)
+    for index in range(10):
+        data = sample("boot-a")
+        data.captured_at_ms = 1_000 + index * 5_000
+        data.scheduled_at_ms = data.captured_at_ms
+        repo.write_snapshot(data)
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("DROP TABLE storage_counter")
+    connection.execute("DROP TABLE storage_meta")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+    monkeypatch.setenv("RT_STORAGE_LIMIT_MIB", "20")
+    monkeypatch.setenv("RT_FINAL_SNAPSHOTS_PER_LIFECYCLE", "3")
+    monkeypatch.setenv("RT_TREND_SNAPSHOTS_PER_LIFECYCLE", "0")
+    monkeypatch.setenv("RT_TREND_INTERVAL_SECONDS", "300")
+
+    result = repack(settings.data_dir, tmp_path / "backups")
+    assert result["policy"]["storage_limit_bytes"] == 20 * 1024 * 1024
+    assert result["policy"]["final_snapshots_per_lifecycle"] == 3
+    assert result["policy"]["trend_snapshots_per_lifecycle"] == 0
+    reopened = Repository(replace(
+        settings,storage_limit_bytes=20*1024*1024,
+        final_snapshots_per_lifecycle=3,trend_snapshots_per_lifecycle=0,
+    ), "host", "test")
+    try:
+        assert reopened.db.execute("SELECT count(*) FROM snapshot WHERE lifecycle_id=?", (lifecycle_id,)).fetchone()[0] == 3
+        assert reopened._snapshot_counts(reopened.db, lifecycle_id) == (3, 0)
+    finally:
+        reopened.close()
+
+
+def test_repack_dry_run_reports_and_install_rejects_managed_budget_overflow(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    repo.start_lifecycle("boot-a", 1)
+    repo.write_snapshot(sample("boot-a"))
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("DROP TABLE storage_counter")
+    connection.execute("DROP TABLE storage_meta")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+
+    dry = repack(settings.data_dir, tmp_path / "backups", dry_run=True, storage_limit_bytes=1024*1024)
+    assert dry["within_storage_budget"] is False
+    assert dry["budget_headroom_bytes"] < 0
+    with pytest.raises(RuntimeError, match="exceeds RT_STORAGE_LIMIT_MIB"):
+        repack(settings.data_dir, tmp_path / "backups", storage_limit_bytes=1024*1024)
+    assert not (tmp_path / "backups").exists()
+
+
+def test_repack_does_not_count_degraded_source_snapshot_as_full(settings, tmp_path):
+    repo = Repository(settings, "host", "test")
+    lifecycle_id = repo.start_lifecycle("boot-a", 1)
+    snapshot_id = repo.write_snapshot(sample("boot-a"))
+    repo.close()
+    connection = sqlite3.connect(settings.data_dir / "reboot-trace.sqlite3")
+    connection.execute("UPDATE snapshot SET persistence_state='degraded_processes' WHERE id=?", (snapshot_id,))
+    connection.execute("DROP TABLE storage_counter")
+    connection.execute("DROP TABLE storage_meta")
+    connection.commit()
+    connection.close()
+    (settings.data_dir / "evidence.json").unlink()
+
+    repack(settings.data_dir, tmp_path / "backups")
+    reopened = Repository(settings, "host", "test")
+    try:
+        assert reopened._snapshot_counts(reopened.db, lifecycle_id) == (0, 1)
+        row = reopened.db.execute("SELECT detail_level,persistence_state FROM snapshot WHERE id=?", (snapshot_id,)).fetchone()
+        assert tuple(row) == ("summary_only", "system_only")
+    finally:
+        reopened.close()
+
+
+def test_storage_migrate_compatibility_entry_forwards_policy(tmp_path,monkeypatch):
+    captured={}
+
+    def fake_repack(data_dir,backup_root,**kwargs):
+        captured.update(data_dir=data_dir,backup_root=backup_root,**kwargs)
+        return {"ok":True}
+
+    monkeypatch.setattr(storage_migrate,"repack",fake_repack)
+    result=storage_migrate.migrate(
+        tmp_path/"data",tmp_path/"backup",dry_run=True,
+        storage_limit_bytes=20*1024*1024,final_count=3,trend_count=0,trend_interval_ms=600_000,
+    )
+    assert result=={"ok":True}
+    assert captured["storage_limit_bytes"]==20*1024*1024
+    assert captured["final_count"]==3
+    assert captured["trend_count"]==0
+    assert captured["trend_interval_ms"]==600_000

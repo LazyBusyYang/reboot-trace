@@ -16,7 +16,7 @@ def test_rejects_resource_amplifying_top_n(monkeypatch):
 
 
 def test_local_container_identity_defaults(monkeypatch):
-    for name in ("RT_PROC_ROOT","RT_HOST_PASSWD","RT_INSTANCE_MARKER_PATH","RT_INSTANCE_MARKER_TARGET_PATH","RT_IDENTITY_SCOPE","RT_REQUIRE_CONTAINER_MARKER","RT_SERVICE_TOKEN","RT_DATA_DIR","RT_SEGMENT_TARGET_MIB"):
+    for name in ("RT_PROC_ROOT","RT_HOST_PASSWD","RT_INSTANCE_MARKER_PATH","RT_INSTANCE_MARKER_TARGET_PATH","RT_IDENTITY_SCOPE","RT_REQUIRE_CONTAINER_MARKER","RT_SERVICE_TOKEN","RT_DATA_DIR","RT_FINAL_SNAPSHOTS_PER_LIFECYCLE","RT_TREND_SNAPSHOTS_PER_LIFECYCLE","RT_TREND_INTERVAL_SECONDS"):
         monkeypatch.delenv(name,raising=False)
     monkeypatch.setenv("RT_PROJECT_DIR",str(Path.cwd()))
     settings=Settings.from_env()
@@ -26,15 +26,22 @@ def test_local_container_identity_defaults(monkeypatch):
     assert settings.identity_scope=="local_container"
     assert settings.require_container_marker is False
     assert settings.service_token is None
-    assert settings.effective_segment_target_bytes() == 12 * 1024 * 1024
+    assert settings.final_snapshots_per_lifecycle == 12
+    assert settings.trend_snapshots_per_lifecycle == 12
+    assert settings.trend_interval_ms == 300_000
 
 
-def test_segment_target_validation(monkeypatch):
-    monkeypatch.setenv("RT_STORAGE_LIMIT_MIB", "50")
-    monkeypatch.setenv("RT_SEGMENT_TARGET_MIB", "12")
-    assert Settings.from_env().effective_segment_target_bytes() == 12 * 1024 * 1024
-    monkeypatch.setenv("RT_SEGMENT_TARGET_MIB", "49")
-    with pytest.raises(ValueError, match="2 MiB"):
+def test_lifecycle_snapshot_retention_validation(monkeypatch):
+    monkeypatch.setenv("RT_FINAL_SNAPSHOTS_PER_LIFECYCLE", "0")
+    with pytest.raises(ValueError, match="must be >= 1"):
+        Settings.from_env()
+    monkeypatch.setenv("RT_FINAL_SNAPSHOTS_PER_LIFECYCLE", "12")
+    monkeypatch.setenv("RT_TREND_SNAPSHOTS_PER_LIFECYCLE", "0")
+    assert Settings.from_env().trend_snapshots_per_lifecycle == 0
+    monkeypatch.setenv("RT_TREND_SNAPSHOTS_PER_LIFECYCLE", "12")
+    monkeypatch.setenv("RT_SAMPLE_INTERVAL_SECONDS", "10")
+    monkeypatch.setenv("RT_TREND_INTERVAL_SECONDS", "5")
+    with pytest.raises(ValueError, match="must be >= RT_SAMPLE_INTERVAL_SECONDS"):
         Settings.from_env()
 
 
