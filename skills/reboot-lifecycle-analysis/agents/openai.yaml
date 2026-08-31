@@ -1,0 +1,3 @@
+interface:
+  display_name: "开发机重启生命周期分析"
+  short_description: "分析开发机重启生命周期并生成通知"
